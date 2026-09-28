@@ -191,22 +191,36 @@ async function lastAssistantTurn(
   sessionID: string,
 ): Promise<{ text: string; model?: ModelRef; toolCalls: number }> {
   const messages = (await ctx.session.context({ sessionID })) as readonly any[]
+
+  // A turn is every assistant message after the last user or synthetic input.
+  // Tool calls usually land in earlier messages of that turn than the final
+  // text, so the whole turn has to be scanned — stopping at the last text
+  // message would report "0 tool calls" for a turn that plainly used them.
+  let start = 0
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const type = messages[i]?.type
+    if (type === "user" || type === "synthetic") {
+      start = i + 1
+      break
+    }
+  }
+
   let model: ModelRef | undefined
   let toolCalls = 0
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const message = messages[i]
+  let text = ""
+  for (const message of messages.slice(start)) {
     if (message?.type !== "assistant") continue
     model ??= message.model as ModelRef | undefined
     const content = (message.content ?? []) as readonly any[]
     toolCalls += content.filter((part) => part.type === "tool").length
-    const text = content
+    const said = content
       .filter((part) => part.type === "text")
       .map((part) => part.text)
       .join("\n")
       .trim()
-    if (text) return { text, model, toolCalls }
+    if (said) text = said
   }
-  return { text: "", model, toolCalls }
+  return { text, model, toolCalls }
 }
 
 function parseVerdict(raw: string): { verdict: Verdict; reason: string } {

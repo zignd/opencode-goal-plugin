@@ -159,6 +159,26 @@ drives that session's loop.
 | `/goal resume` | Resume the loop with a fresh turn budget. |
 | `/goal clear` | Drop the goal entirely. |
 
+### Querying a goal while it is running
+
+`/goal status`, `/goal pause` and `/goal clear` all work while the loop is running. None of
+them resets the turn counter, and `pause` and `clear` stop the loop on the next boundary.
+
+There is one caveat, and it is a limitation of the host rather than a choice. OpenCode gives a
+plugin no way to write a message into a session without starting an execution, so the status
+report is delivered as a real prompt. The agent sees it and answers, costing one short model
+call, and in testing it was steered into the turn already in flight rather than queued behind
+it. The loop is not interrupted — the running turn finishes and its continuation is sent
+normally — but the judge's view of that turn now includes the status exchange.
+
+You rarely need this mid-loop. Every continuation already prints its own
+`↻ [continuing toward your standing goal — turn N/M]` line, so live state is in the
+transcript. Reach for `/goal status` when the loop is paused or finished, when you want the
+full goal text and the last judge reason, or to confirm a pause landed.
+
+`/goal pause` takes effect immediately even mid-turn: no further continuation is injected.
+Pressing <kbd>esc</kbd> also stops the loop, because an interrupted turn pauses the goal.
+
 ### Completion contracts
 
 A vague goal can only be judged vaguely. Give the judge a bar to clear. Any line starting with
