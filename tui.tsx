@@ -142,21 +142,51 @@ export default Plugin.define({
       return trim(directory) === trim(mine)
     }
 
-    const offEvents = rpc.events.on("changed", (event) => {
-      trace("changed event from", event.location?.directory ?? "(none)")
-      if (!isLocal(event.location?.directory)) {
-        trace("  -> filtered out, not our location")
-        return
+    // Each registration is guarded on its own. A throw anywhere in setup
+    // discards the entire plugin, so one bad call would otherwise cost the
+    // panel, the toasts and the live updates together.
+    const cleanups: Array<() => void> = []
+    const guard = (what: string, register: () => (() => void) | void) => {
+      try {
+        const dispose = register()
+        if (typeof dispose === "function") cleanups.push(dispose)
+        trace("registered", what)
+      } catch (error) {
+        trace("FAILED", what, (error as Error).message)
       }
-      const { sessionID, state } = asChanged(event.data)
-      if (!state) {
-        announced.delete(sessionID)
-        track(sessionID, null)
-        return
-      }
-      track(sessionID, state)
-      announce(state)
-    })
+    }
+
+    guard("rpc events", () =>
+      rpc.events.on("changed", (event) => {
+        trace("changed event from", event.location?.directory ?? "(none)")
+        if (!isLocal(event.location?.directory)) {
+          trace("  -> filtered out, not our location")
+          return
+        }
+        const { sessionID, state } = asChanged(event.data)
+        if (!state) {
+          announced.delete(sessionID)
+          track(sessionID, null)
+          return
+        }
+        track(sessionID, state)
+        announce(state)
+      }),
+    )
+
+    guard("session.panel slot", () =>
+      context.ui.slot({
+        append: "session.panel",
+        render: (panel) => {
+          trace("slot render", "name=", panel.name, "session=", panel.sessionID)
+          return (
+            <Show when={panel.name === PANEL}>
+              <Panel panel={panel} />
+            </Show>
+          )
+        },
+      }),
+    )
 
     /** Pull state for a session the panel opened before any event arrived. */
     const prime = async (sessionID: string) => {
@@ -248,39 +278,55 @@ export default Plugin.define({
       )
     }
 
-    const offSlot = context.ui.slot({
-      append: "session.panel",
-      render: (panel) => {
-        trace("slot render", "name=", panel.name, "session=", panel.sessionID, "width=", String(panel.width))
-        return (
-          <Show when={panel.name === PANEL}>
-            <Panel panel={panel} />
-          </Show>
-        )
+    /**
+     * The keymap layer is "owned by the calling component", and setup() has no
+     * component around it — registering one there throws "Keymap.Provider is
+     * missing" and takes the whole plugin down with it, taking the panel and the
+     * toasts too. The documented home for it is an `app` slot render, which is
+     * a real component.
+     */
+    guard("app slot", () =>
+      context.ui.slot({
+      append: "app",
+      render: () => {
+        try {
+          context.keymap.layer(() => ({
+            mode: "global",
+            commands: [
+              {
+                id: "goal.panel.toggle",
+                title: "Toggle goal panel",
+                slash: { name: "goalpanel" },
+                run: () => {
+                  try {
+                    if (context.ui.panel.current()?.name === PANEL) {
+                      context.ui.panel.close()
+                      trace("toggle: closed")
+                    } else {
+                      ensurePanel("toggle command")
+                    }
+                  } catch (error) {
+                    trace("toggle THREW", (error as Error).message)
+                  }
+                },
+              },
+            ],
+          }))
+          trace("keymap layer registered")
+        } catch (error) {
+          trace("keymap layer FAILED", (error as Error).message)
+        }
+        return null
       },
-    })
-    trace("slot registered, disposer type:", typeof offSlot)
-
-    context.keymap.layer(() => ({
-      mode: "global",
-      commands: [
-        {
-          id: "goal.panel.toggle",
-          title: "Toggle goal panel",
-          slash: { name: "goalpanel" },
-          run: () => {
-            const current = context.ui.panel.current()
-            trace("toggle command, current=", JSON.stringify(current))
-            if (current?.name === PANEL) context.ui.panel.close()
-            else ensurePanel("toggle command")
-          },
-        },
-      ],
-    }))
+    }),
+    )
 
     return () => {
-      offEvents()
-      offSlot()
+      for (const dispose of cleanups.reverse()) {
+        try {
+          dispose()
+        } catch {}
+      }
     }
   },
 })
