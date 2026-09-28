@@ -88,6 +88,12 @@ export const Goal = Rpc.define({
      * record goes stale and the server falls back to in-band messages.
      */
     attach: { input: sessionInput, output: empty },
+    /**
+     * The panel went away, so stop treating this session as TUI-watched. Without
+     * this the server would stay quiet until the heartbeat expired, which is a
+     * long time to show nothing after deliberately closing the panel.
+     */
+    detach: { input: sessionInput, output: empty },
   },
   events: {
     /** Emitted whenever the server writes goal state. `state` is null once cleared. */

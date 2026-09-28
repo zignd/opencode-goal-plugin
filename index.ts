@@ -321,6 +321,11 @@ export default Plugin.define({
         await ctx.storage.set(`attached:${sessionID}`, { at: Date.now() })
         return {}
       },
+      detach: async (input) => {
+        const { sessionID } = input as { sessionID: string }
+        await ctx.storage.remove(`attached:${sessionID}`)
+        return {}
+      },
     })
 
     /**
@@ -432,27 +437,30 @@ export default Plugin.define({
           const argument = rest.join(" ").trim()
 
           if (!argument && ["pause", "resume", "clear", "status"].includes(sub)) {
+            // A subcommand is a direct question, so it always answers — even when
+            // the panel is open and already showing the same thing. Going quiet
+            // here reads as the command being broken.
             const state = await read(sessionID)
             if (sub === "status") {
-              await say(sessionID, statusReport(state))
+              await note(sessionID, statusReport(state))
               return
             }
             if (sub === "pause") {
               if (!state) {
-                await say(sessionID, statusReport(undefined))
+                await note(sessionID, statusReport(undefined))
                 return
               }
               await write(sessionID, { ...state, status: "paused", reason: "paused by the user" })
-              await say(sessionID, `⏸ Goal paused — ${state.turns}/${state.maxTurns} turns used.`)
+              await note(sessionID, `⏸ Goal paused — ${state.turns}/${state.maxTurns} turns used.`)
               return
             }
             if (sub === "resume") {
               if (!state) {
-                await say(sessionID, statusReport(undefined))
+                await note(sessionID, statusReport(undefined))
                 return
               }
               if (state.status === "active") {
-                await say(sessionID, statusReport(state))
+                await note(sessionID, statusReport(state))
                 return
               }
               const resumed: GoalState = {
@@ -467,12 +475,16 @@ export default Plugin.define({
               await write(sessionID, resumed)
               await ctx.session.prompt({
                 sessionID,
-                text: continuationPrompt({ ...resumed, turns: 1 }, "resumed by the user", await isAttached(sessionID)),
+                text: continuationPrompt(
+                  { ...resumed, turns: 1 },
+                  "resumed by the user",
+                  await isAttached(sessionID),
+                ),
               })
               return
             }
             await write(sessionID, undefined)
-            await say(sessionID, "Goal cleared.")
+            await note(sessionID, "Goal cleared.")
             return
           }
 

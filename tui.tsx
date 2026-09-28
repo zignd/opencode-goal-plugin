@@ -1,5 +1,5 @@
 import { Plugin } from "@opencode/plugin/tui"
-import { createEffect, createSignal, Show } from "solid-js"
+import { createEffect, createSignal, onCleanup, Show } from "solid-js"
 import { Goal, type GoalView } from "./rpc.js"
 
 /**
@@ -74,6 +74,15 @@ export default Plugin.define({
         await rpc.attach({ sessionID })
       } catch {
         // Server not ready, or shutting down. Harmless.
+      }
+    }
+
+    /** Panel gone: let the server resume in-band notices straight away. */
+    const detach = async (sessionID: string) => {
+      try {
+        await rpc.detach({ sessionID })
+      } catch {
+        // Nothing to undo.
       }
     }
 
@@ -185,10 +194,17 @@ export default Plugin.define({
 
     const Panel = (props: { panel: { sessionID: string; width?: number } }) => {
       // A goal that finished before this TUI started would never emit an event,
-      // so ask for it once whenever the panel settles on a session.
+      // so ask for it once whenever the panel settles on a session. This only
+      // runs while the panel is actually mounted, which is what makes attach a
+      // truthful signal that something is displaying the state.
       createEffect(() => {
         const sessionID = props.panel.sessionID
         if (sessionID) void prime(sessionID)
+      })
+      // Unmounting means the user closed the panel; hand the reporting back.
+      onCleanup(() => {
+        const sessionID = props.panel.sessionID
+        if (sessionID) void detach(sessionID)
       })
       return (
         <box flexDirection="column" paddingLeft={1} paddingRight={1}>
