@@ -1,14 +1,20 @@
 {
   "name": "opencode-goal-plugin",
-  "version": "1.0.0",
-  "description": "Persistent /goal command for OpenCode 2: set a standing goal and keep working until it is done, blocked, or out of turns",
+  "version": "1.1.0",
+  "description": "Persistent /goal command for OpenCode 2: set a standing goal and keep working until it is done, blocked, stalled, or out of turns",
   "type": "module",
   "main": "./index.ts",
   "exports": {
-    ".": "./index.ts"
+    ".": "./index.ts",
+    "./rpc": "./rpc.ts",
+    "./tui": "./tui.ts"
   },
   "files": [
-    "index.ts"
+    "index.ts",
+    "rpc.ts",
+    "tui.ts",
+    "tui.tsx",
+    "tsconfig.json"
   ],
   "keywords": [
     "opencode",
@@ -29,5 +35,17 @@
   "homepage": "https://github.com/zignd/opencode-goal-plugin#readme",
   "dependencies": {
     "@opencode/plugin": "^2.0.18"
+  },
+  "peerDependencies": {
+    "@opentui/core": ">=0.5.8",
+    "@opentui/solid": ">=0.5.8",
+    "solid-js": ">=1.9.0"
+  },
+  "devDependencies": {
+    "@opentui/core": "^0.5.12",
+    "@opentui/solid": "^0.5.12",
+    "@types/node": "^24.0.0",
+    "solid-js": "^1.9.15",
+    "typescript": "^5.9.3"
   }
 }

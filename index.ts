@@ -1,5 +1,6 @@
 import { realpathSync } from "node:fs"
 import { Plugin } from "@opencode/plugin"
+import { Goal, type GoalView } from "./rpc.js"
 
 /**
  * Persistent goals, modelled on the Ralph loop.
@@ -134,6 +135,21 @@ function renderContract(contract: Contract): string {
   return lines.length ? `\n\n${lines.join("\n")}` : ""
 }
 
+/** Project internal state into the shape the TUI panel renders. */
+function toView(state: GoalState): Omit<GoalView, "sessionID"> {
+  return {
+    goal: state.goal,
+    status: state.status,
+    turns: state.turns,
+    maxTurns: state.maxTurns,
+    stalled: state.stalled ?? 0,
+    repeats: state.repeats ?? 0,
+    reason: state.reason ?? "",
+    verification: state.contract.verification ?? "",
+    updatedAt: Date.now(),
+  }
+}
+
 const JUDGE_PROMPT = `You are a strict completion judge for an autonomous coding agent. You do not do the work and you never give advice. Your only job is to classify the state of a standing goal after one turn.
 
 <goal>
@@ -162,10 +178,15 @@ Rules:
 - "continue" when real, non-repeating progress is still possible. Slow is fine. Stalled is not.
 - Judge only what is in front of you. Do not assume work happened off-screen.`
 
-function continuationPrompt(state: GoalState, reason: string): string {
-  return `↻ [continuing toward your standing goal — turn ${state.turns}/${state.maxTurns}]
-
-Goal: ${state.goal}${renderContract(state.contract)}
+function continuationPrompt(state: GoalState, reason: string, quiet: boolean): string {
+  // With a TUI watching, the panel already shows which turn this is, so the
+  // banner is dropped to keep the transcript quiet. Without one — desktop,
+  // web, `opencode run` — it stays, because otherwise a continuation would be
+  // indistinguishable from a message the user typed.
+  const banner = quiet
+    ? ""
+    : `↻ [continuing toward your standing goal — turn ${state.turns}/${state.maxTurns}]\n\n`
+  return `${banner}Goal: ${state.goal}${renderContract(state.contract)}
 
 Judge's note: ${reason}
 
@@ -244,6 +265,8 @@ export default Plugin.define({
     const stallLimit =
       typeof ctx.options.stallLimit === "number" ? ctx.options.stallLimit : DEFAULT_STALL_LIMIT
     const judgeOverride = ctx.options.judgeModel as ModelRef | undefined
+    // Escape hatch: keep the in-band session messages even with the TUI open.
+    const forceInBand = ctx.options.forceInBand === true
     const judging = new Set<string>()
 
     const key = (sessionID: string) => `goal:${sessionID}`
@@ -254,7 +277,51 @@ export default Plugin.define({
     const write = async (sessionID: string, state: GoalState | undefined) => {
       if (state) await ctx.storage.set(key(sessionID), state as any)
       else await ctx.storage.remove(key(sessionID))
+      await publish(sessionID)
     }
+
+    /**
+     * Push the current state to any TUI watching. The panel is the only place
+     * the loop reports itself now, so a failed emit must never stop the loop.
+     */
+    const publish = async (sessionID: string) => {
+      try {
+        const state = await read(sessionID)
+        await rpc.events.emit("changed", {
+          sessionID,
+          state: state ? { ...toView(state), sessionID } : null,
+        })
+      } catch {
+        // No subscriber, or the connection went away. The loop carries on.
+      }
+    }
+
+    // A TUI calls attach on setup and again on every update, which doubles as a
+    // heartbeat. If it dies the record ages out and the server quietly returns
+    // to sending in-band session messages.
+    const ATTACH_TTL = 15 * 60 * 1000
+    const isAttached = async (sessionID: string) => {
+      const record = (await ctx.storage.get(`attached:${sessionID}`)) as { at?: number } | undefined
+      if (typeof record?.at !== "number") return false
+      if (Date.now() - record.at > ATTACH_TTL) {
+        await ctx.storage.remove(`attached:${sessionID}`)
+        return false
+      }
+      return true
+    }
+
+    const rpc = await ctx.rpc.register(Goal, {
+      get: async (input) => {
+        const { sessionID } = input as { sessionID: string }
+        const state = await read(sessionID)
+        return { sessionID, state: state ? { ...toView(state), sessionID } : null }
+      },
+      attach: async (input) => {
+        const { sessionID } = input as { sessionID: string }
+        await ctx.storage.set(`attached:${sessionID}`, { at: Date.now() })
+        return {}
+      },
+    })
 
     /**
      * A global plugin is instantiated once per location, and every instance sees
@@ -317,10 +384,17 @@ export default Plugin.define({
      * Report to the user. Note that a synthetic inbox message is a real prompt:
      * it starts an execution and costs a model call. So this is only for
      * terminal states and for subcommands the user typed, never per iteration.
+     *
+     * `note` is unconditional, and is reserved for input errors the user has to
+     * see. `say` covers everything the panel can already show, and goes quiet
+     * when a TUI is attached so the loop stops paying for messages nobody needs.
      */
     const note = (sessionID: string, text: string) => ctx.session.synthetic({ sessionID, text })
+    const say = async (sessionID: string, text: string) => {
+      if (forceInBand || !(await isAttached(sessionID))) await note(sessionID, text)
+    }
     const terminal = (sessionID: string, text: string) =>
-      note(sessionID, `${text}\n\n(The goal loop has stopped. Do not start new work; reply in one short sentence.)`)
+      say(sessionID, `${text}\n\n(The goal loop has stopped. Do not start new work; reply in one short sentence.)`)
 
     const resolveJudgeModel = async (sessionID: string): Promise<ModelRef> => {
       if (judgeOverride) return judgeOverride
@@ -360,25 +434,25 @@ export default Plugin.define({
           if (!argument && ["pause", "resume", "clear", "status"].includes(sub)) {
             const state = await read(sessionID)
             if (sub === "status") {
-              await note(sessionID, statusReport(state))
+              await say(sessionID, statusReport(state))
               return
             }
             if (sub === "pause") {
               if (!state) {
-                await note(sessionID, statusReport(undefined))
+                await say(sessionID, statusReport(undefined))
                 return
               }
               await write(sessionID, { ...state, status: "paused", reason: "paused by the user" })
-              await note(sessionID, `⏸ Goal paused — ${state.turns}/${state.maxTurns} turns used.`)
+              await say(sessionID, `⏸ Goal paused — ${state.turns}/${state.maxTurns} turns used.`)
               return
             }
             if (sub === "resume") {
               if (!state) {
-                await note(sessionID, statusReport(undefined))
+                await say(sessionID, statusReport(undefined))
                 return
               }
               if (state.status === "active") {
-                await note(sessionID, statusReport(state))
+                await say(sessionID, statusReport(state))
                 return
               }
               const resumed: GoalState = {
@@ -393,17 +467,17 @@ export default Plugin.define({
               await write(sessionID, resumed)
               await ctx.session.prompt({
                 sessionID,
-                text: continuationPrompt({ ...resumed, turns: 1 }, "resumed by the user"),
+                text: continuationPrompt({ ...resumed, turns: 1 }, "resumed by the user", await isAttached(sessionID)),
               })
               return
             }
             await write(sessionID, undefined)
-            await note(sessionID, "Goal cleared.")
+            await say(sessionID, "Goal cleared.")
             return
           }
 
           if (!raw) {
-            await note(sessionID, statusReport(await read(sessionID)))
+            await say(sessionID, statusReport(await read(sessionID)))
             return
           }
 
@@ -540,7 +614,10 @@ export default Plugin.define({
           // real prompt, so it would start another execution, re-enter this
           // loop, and burn the budget twice as fast. The continuation prompt
           // itself already carries the judge's reason.
-          await ctx.session.prompt({ sessionID, text: continuationPrompt(next, verdict.reason) })
+          await ctx.session.prompt({
+            sessionID,
+            text: continuationPrompt(next, verdict.reason, await isAttached(sessionID)),
+          })
         } catch (error) {
           const current = await read(sessionID)
           if (current?.status === "active") {

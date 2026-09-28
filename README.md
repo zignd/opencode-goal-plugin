@@ -107,6 +107,7 @@ defaults:
 | `maxTurns` | `20` | Automatic continuation turns before the loop auto-pauses. The initial `/goal` turn is not counted, so the default allows 21 agent executions in total. See below. |
 | `stallLimit` | `2` | Consecutive turns that ran **no tools** before the loop is declared stalled. |
 | `judgeModel` | session model | Model used for the `done` / `continue` / `blocked` verdict. |
+| `forceInBand` | `false` | Keep posting the loop's notices into the session even when the TUI panel is open. |
 
 ### What a "turn" is
 
@@ -158,6 +159,42 @@ drives that session's loop.
 | `/goal pause` | Stop auto-continuation but keep the goal. |
 | `/goal resume` | Resume the loop with a fresh turn budget. |
 | `/goal clear` | Drop the goal entirely. |
+
+### The session panel (TUI)
+
+In the terminal UI the loop reports itself in the session's right-hand panel, which opens by
+itself when you start a goal:
+
+```text
+● goal running
+Fix every failing test in tests/api
+proof: scripts/run-tests.sh passes
+████████░░░░░░░░ 3/20 turns
+The agent fixed two tests but tests/api/test_auth.py still fails
+```
+
+It shows the goal, the `verify:` line it is working toward, a turn counter, the stalled and
+repeating counters when they are non-zero, and the judge's last reason. When the loop reaches
+`done`, `blocked` or paused, you get a toast instead of a message in the transcript.
+
+Dismiss the panel with its own control and bring it back with `/goalpanel`, which toggles.
+
+**What the panel changes.** With it open, the server stops posting the loop's notices into the
+session, because a synthetic session message is a real prompt and costs a model call. It also
+drops the `↻ [continuing toward your standing goal — turn N/M]` banner from continuation
+prompts, so the transcript stays quiet. Both fall back automatically:
+
+- No TUI attached — desktop, the web client, `opencode run` — and the notices and the banner
+  come back, because otherwise a continuation would be indistinguishable from a message you
+  typed.
+- Panel closed — notices return too, since nothing is displaying them.
+
+A TUI only ever marks **its own location, and only the session its panel is showing**, as
+TUI-watched, so a terminal open in one project will not silence the notices for a headless run
+in another. Set `forceInBand: true` if you want the messages even with the panel open.
+
+> Editing `index.ts` or `rpc.ts` hot-reloads. Editing `tui.tsx` does **not** — restart the TUI
+> to pick it up, because the discovered `tui.ts` entrypoint is what gets watched.
 
 ### Querying a goal while it is running
 
@@ -245,18 +282,33 @@ is achieved. That idea comes from the `/goal` command in
 judge verdicts this plugin deliberately mirrors. This is an independent implementation against
 OpenCode's V2 plugin API; no code was copied from either project.
 
+## Layout
+
+| File | Runs in | Role |
+| --- | --- | --- |
+| `index.ts` | OpenCode server | The loop itself, plus the RPC the TUI reads. |
+| `rpc.ts` | shared | The contract between the two halves. |
+| `tui.ts` | TUI | Discovered entrypoint; re-exports the panel. |
+| `tui.tsx` | TUI | The panel and the toasts. JSX needs the `.tsx` extension. |
+
 ## Development
 
 ```sh
 git clone https://github.com/zignd/opencode-goal-plugin.git
 cd opencode-goal-plugin
 npm install
-npx tsc --noEmit --strict --skipLibCheck --module preserve \
-  --moduleResolution bundler --target es2022 --lib es2023 --types node index.ts
+npx tsc -p tsconfig.json
 ```
 
-`index.ts` is the whole plugin. Bumping support for a new OpenCode release means bumping the
-`@opencode/plugin` dependency and re-running the typecheck above.
+Bumping support for a new OpenCode release means bumping `@opencode/plugin` and re-running the
+typecheck. `tsconfig.json` carries `jsxImportSource: "@opentui/solid"`, which is what makes the
+panel's JSX typecheck.
+
+Two notes for anyone hacking on it:
+
+- RPC schemas must be `as const`. Annotating them as a wider JSON Schema type stops the
+  definition being assignable to `PortableDefinition`, and `register` rejects it.
+- `session.synthetic` is a real prompt that costs a model call. Never use it per iteration.
 
 ## License
 
