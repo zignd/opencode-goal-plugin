@@ -310,6 +310,23 @@ export default Plugin.define({
       return true
     }
 
+    /**
+     * Whether a TUI is running for a directory at all. Separate from
+     * `isAttached`, which only means a panel is currently displaying a session.
+     * Refreshed by the TUI on a timer, so a TUI that is open but idle still
+     * counts as present.
+     */
+    const PRESENT_TTL = 5 * 60 * 1000
+    const isTuiPresent = async (directory: string) => {
+      const record = (await ctx.storage.get(`present:${directory}`)) as { at?: number } | undefined
+      if (typeof record?.at !== "number") return false
+      if (Date.now() - record.at > PRESENT_TTL) {
+        await ctx.storage.remove(`present:${directory}`)
+        return false
+      }
+      return true
+    }
+
     const rpc = await ctx.rpc.register(Goal, {
       get: async (input) => {
         const { sessionID } = input as { sessionID: string }
@@ -324,6 +341,11 @@ export default Plugin.define({
       detach: async (input) => {
         const { sessionID } = input as { sessionID: string }
         await ctx.storage.remove(`attached:${sessionID}`)
+        return {}
+      },
+      present: async (input) => {
+        const { directory } = input as { directory: string }
+        await ctx.storage.set(`present:${directory}`, { at: Date.now() })
         return {}
       },
     })
@@ -442,10 +464,12 @@ export default Plugin.define({
             // here reads as the command being broken.
             const state = await read(sessionID)
             if (sub === "panel") {
-              // Only a TUI can open a panel, so hand the request over. Resolving
-              // it server-side would mean pretending, and the user would see
-              // nothing happen.
-              if (await isAttached(sessionID)) {
+              // Gated on TUI *presence*, not on attach. Attach is dropped when
+              // the panel closes, so gating on it made this command able to
+              // close the panel but never reopen it.
+              const session = (await ctx.session.get({ sessionID })) as { location?: { directory?: string } }
+              const directory = session?.location?.directory
+              if (directory && (await isTuiPresent(directory))) {
                 try {
                   await rpc.events.emit("panel", {})
                 } catch {}
@@ -453,7 +477,7 @@ export default Plugin.define({
               }
               await note(
                 sessionID,
-                "The goal panel is a terminal-UI feature. Use /goal status here, or open this session in the TUI.",
+                "The goal panel is a terminal-UI feature. Use /goal status here, or open this directory in the TUI.",
               )
               return
             }

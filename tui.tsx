@@ -69,6 +69,25 @@ export default Plugin.define({
      * event stream is global, so attaching to everything would silence the
      * in-band notices for headless runs in unrelated projects.
      */
+    /**
+     * Tell the server a TUI is running for this directory, so `/goal panel`
+     * knows it has somewhere to send the request. Kept separate from attach,
+     * which is dropped when the panel closes - and a closed panel is precisely
+     * when the user reaches for the command to reopen it.
+     */
+    const markPresent = async () => {
+      const directory = context.location?.directory
+      if (!directory) return
+      try {
+        await rpc.present({ directory })
+      } catch {
+        // Server not ready, or shutting down.
+      }
+    }
+
+    void markPresent()
+    const presenceTimer = setInterval(() => void markPresent(), 60_000)
+
     const attach = async (sessionID: string) => {
       try {
         await rpc.attach({ sessionID })
@@ -320,6 +339,7 @@ export default Plugin.define({
     )
 
     return () => {
+      clearInterval(presenceTimer)
       for (const dispose of cleanups.reverse()) {
         try {
           dispose()

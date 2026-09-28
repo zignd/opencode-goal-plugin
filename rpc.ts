@@ -94,6 +94,23 @@ export const Goal = Rpc.define({
      * long time to show nothing after deliberately closing the panel.
      */
     detach: { input: sessionInput, output: empty },
+    /**
+     * Announce that a TUI is running for a directory, refreshed on a timer.
+     *
+     * This is deliberately not the same thing as `attach`. Attach means "a panel
+     * is displaying this session right now", so it is dropped when the panel
+     * closes - which is exactly when `/goal panel` most needs to know a TUI is
+     * there in order to reopen it.
+     */
+    present: {
+      input: {
+        type: "object",
+        properties: { directory: { type: "string" } },
+        required: ["directory"],
+        additionalProperties: false,
+      },
+      output: empty,
+    },
   },
   events: {
     /** Emitted whenever the server writes goal state. `state` is null once cleared. */
