@@ -1,14 +1,6 @@
 import { Plugin } from "@opencode/plugin/tui"
-import { appendFileSync } from "node:fs"
 import { createEffect, createSignal, onCleanup, Show } from "solid-js"
 import { Goal, type GoalView } from "./rpc.js"
-
-/** Temporary: the TUI's own stdout is not visible to automated checks. */
-const trace = (...parts: unknown[]) => {
-  try {
-    appendFileSync("/tmp/goal-tui-trace.log", parts.map(String).join(" ") + "\n")
-  } catch {}
-}
 
 /**
  * The TUI half of the goal plugin.
@@ -103,17 +95,13 @@ export default Plugin.define({
     const ensurePanel = (why: string) => {
       try {
         const current = context.ui.panel.current()
-        trace("ensurePanel", why, "current=", JSON.stringify(current))
         if (current?.name === PANEL) return
         const opened = context.ui.panel.open(PANEL)
-        trace("ensurePanel", why, "open returned", String(opened))
       } catch (error) {
-        trace("ensurePanel", why, "THREW", (error as Error).message)
       }
     }
 
     const announce = (state: GoalView) => {
-      trace("announce", state.status, "turns=", state.turns)
       if (state.status === "active") {
         if (state.turns === 0) ensurePanel("goal started")
         return
@@ -150,17 +138,13 @@ export default Plugin.define({
       try {
         const dispose = register()
         if (typeof dispose === "function") cleanups.push(dispose)
-        trace("registered", what)
       } catch (error) {
-        trace("FAILED", what, (error as Error).message)
       }
     }
 
     guard("rpc events", () =>
       rpc.events.on("changed", (event) => {
-        trace("changed event from", event.location?.directory ?? "(none)")
         if (!isLocal(event.location?.directory)) {
-          trace("  -> filtered out, not our location")
           return
         }
         const { sessionID, state } = asChanged(event.data)
@@ -178,7 +162,6 @@ export default Plugin.define({
       context.ui.slot({
         append: "session.panel",
         render: (panel) => {
-          trace("slot render", "name=", panel.name, "session=", panel.sessionID)
           return (
             <Show when={panel.name === PANEL}>
               <Panel panel={panel} />
@@ -222,8 +205,12 @@ export default Plugin.define({
         const width = Math.max(8, Math.min(28, (props.width ?? 44) - 16))
         const ratio = props.view.maxTurns > 0 ? props.view.turns / props.view.maxTurns : 0
         const filled = Math.min(width, Math.round(ratio * width))
-        return { bar: "█".repeat(filled) + "░".repeat(width - filled), colour: status().colour }
+        return "█".repeat(filled) + "░".repeat(width - filled)
       }
+      // `turns` counts continuations, so the opening turn is not in it. Adding
+      // one keeps "0 turns" from reading as "nothing happened" on a goal that
+      // succeeded immediately.
+      const turnsUsed = props.view.turns + 1
       return (
         <>
           <text fg={status().colour}>● goal {status().label}</text>
@@ -231,9 +218,16 @@ export default Plugin.define({
           <Show when={props.view.verification}>
             <text fg={palette.muted}>proof: {props.view.verification}</text>
           </Show>
-          <Show when={props.view.status === "active"}>
+          <Show
+            when={props.view.status === "active"}
+            fallback={
+              <text fg={palette.muted}>
+                finished after {turnsUsed} of {props.view.maxTurns} turns
+              </text>
+            }
+          >
             <text fg={palette.muted}>
-              {bar().bar} {props.view.turns}/{props.view.maxTurns} turns
+              {bar()} turn {props.view.turns}/{props.view.maxTurns}
             </text>
           </Show>
           <Show when={props.view.stalled > 0}>
@@ -269,10 +263,7 @@ export default Plugin.define({
             when={states()[props.panel.sessionID]}
             fallback={<text fg={palette.muted}>No goal set. Use /goal to start one.</text>}
           >
-            {(view) => {
-              trace("Body render for", props.panel.sessionID, view().status)
-              return <Body view={view()} width={props.panel.width} />
-            }}
+            {(view) => <Body view={view()} width={props.panel.width} />}
           </Show>
         </box>
       )
@@ -301,20 +292,16 @@ export default Plugin.define({
                   try {
                     if (context.ui.panel.current()?.name === PANEL) {
                       context.ui.panel.close()
-                      trace("toggle: closed")
                     } else {
                       ensurePanel("toggle command")
                     }
                   } catch (error) {
-                    trace("toggle THREW", (error as Error).message)
                   }
                 },
               },
             ],
           }))
-          trace("keymap layer registered")
         } catch (error) {
-          trace("keymap layer FAILED", (error as Error).message)
         }
         return null
       },
