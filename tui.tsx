@@ -1,6 +1,14 @@
 import { Plugin } from "@opencode/plugin/tui"
+import { appendFileSync } from "node:fs"
 import { createEffect, createSignal, onCleanup, Show } from "solid-js"
 import { Goal, type GoalView } from "./rpc.js"
+
+/** Temporary: the TUI's own stdout is not visible to automated checks. */
+const trace = (...parts: unknown[]) => {
+  try {
+    appendFileSync("/tmp/goal-tui-trace.log", parts.map(String).join(" ") + "\n")
+  } catch {}
+}
 
 /**
  * The TUI half of the goal plugin.
@@ -86,13 +94,28 @@ export default Plugin.define({
       }
     }
 
+    /**
+     * Make sure the panel is on screen. Called for every state change rather
+     * than only on turn 0, so whichever event lands first still opens it.
+     * Wrapped because this runs inside an event callback rather than a command,
+     * and a throw here would otherwise be swallowed and leave no panel at all.
+     */
+    const ensurePanel = (why: string) => {
+      try {
+        const current = context.ui.panel.current()
+        trace("ensurePanel", why, "current=", JSON.stringify(current))
+        if (current?.name === PANEL) return
+        const opened = context.ui.panel.open(PANEL)
+        trace("ensurePanel", why, "open returned", String(opened))
+      } catch (error) {
+        trace("ensurePanel", why, "THREW", (error as Error).message)
+      }
+    }
+
     const announce = (state: GoalView) => {
+      trace("announce", state.status, "turns=", state.turns)
       if (state.status === "active") {
-        // Open on a fresh goal, but never yank the panel away from a session the
-        // user is already reading.
-        if (state.turns === 0 && context.ui.panel.current() === undefined) {
-          context.ui.panel.open(PANEL)
-        }
+        if (state.turns === 0) ensurePanel("goal started")
         return
       }
       const fingerprint = `${state.status}:${state.turns}:${state.reason}`
@@ -120,7 +143,11 @@ export default Plugin.define({
     }
 
     const offEvents = rpc.events.on("changed", (event) => {
-      if (!isLocal(event.location?.directory)) return
+      trace("changed event from", event.location?.directory ?? "(none)")
+      if (!isLocal(event.location?.directory)) {
+        trace("  -> filtered out, not our location")
+        return
+      }
       const { sessionID, state } = asChanged(event.data)
       if (!state) {
         announced.delete(sessionID)
@@ -212,7 +239,10 @@ export default Plugin.define({
             when={states()[props.panel.sessionID]}
             fallback={<text fg={palette.muted}>No goal set. Use /goal to start one.</text>}
           >
-            {(view) => <Body view={view()} width={props.panel.width} />}
+            {(view) => {
+              trace("Body render for", props.panel.sessionID, view().status)
+              return <Body view={view()} width={props.panel.width} />
+            }}
           </Show>
         </box>
       )
@@ -220,12 +250,16 @@ export default Plugin.define({
 
     const offSlot = context.ui.slot({
       append: "session.panel",
-      render: (panel) => (
-        <Show when={panel.name === PANEL}>
-          <Panel panel={panel} />
-        </Show>
-      ),
+      render: (panel) => {
+        trace("slot render", "name=", panel.name, "session=", panel.sessionID, "width=", String(panel.width))
+        return (
+          <Show when={panel.name === PANEL}>
+            <Panel panel={panel} />
+          </Show>
+        )
+      },
     })
+    trace("slot registered, disposer type:", typeof offSlot)
 
     context.keymap.layer(() => ({
       mode: "global",
@@ -235,8 +269,10 @@ export default Plugin.define({
           title: "Toggle goal panel",
           slash: { name: "goalpanel" },
           run: () => {
-            if (context.ui.panel.current()?.name === PANEL) context.ui.panel.close()
-            else context.ui.panel.open(PANEL)
+            const current = context.ui.panel.current()
+            trace("toggle command, current=", JSON.stringify(current))
+            if (current?.name === PANEL) context.ui.panel.close()
+            else ensurePanel("toggle command")
           },
         },
       ],
