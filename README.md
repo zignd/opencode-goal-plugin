@@ -60,11 +60,12 @@ cd ~/.config/opencode/plugins/goal
 npm install
 ```
 
-`~/.config/opencode/plugins/` is auto-discovered, so there is nothing to configure. Confirm:
+`~/.config/opencode/plugins/` is auto-discovered, so the clone is all you need. To confirm,
+type `/` in the TUI — `/goal` should be in the list.
 
-```sh
-opencode plugin list      # should list: goal  local  …/plugins/goal/index.ts
-```
+> Do **not** use `opencode plugin list` to verify a discovery install. That command reports
+> plugins declared in the `plugins` array of your config, so a plugin installed purely by
+> directory discovery will not appear in it even while working perfectly.
 
 ### As a configured package plugin
 
@@ -81,7 +82,9 @@ cd .opencode/plugins/goal && npm install
 
 ### Options
 
-Add to `~/.config/opencode/opencode.json` (or a project `opencode.json`) to change behaviour:
+The `plugins` array is also the only way to pass configuration, so add it to
+`~/.config/opencode/opencode.json` (or a project `opencode.json`) if you want to change the
+defaults:
 
 ```jsonc
 {
@@ -105,9 +108,10 @@ Add to `~/.config/opencode/opencode.json` (or a project `opencode.json`) to chan
 | `stallLimit` | `2` | Consecutive turns that ran **no tools** before the loop is declared stalled. |
 | `judgeModel` | session model | Model used for the `done` / `continue` / `blocked` verdict. |
 
-> If you installed into the auto-discovered `plugins/` directory, the `package` key above is
-> optional — drop the whole `plugins` block and only set options if you need them, otherwise
-> the goal is registered twice.
+If you are content with the defaults, omit this block entirely — the directory is still
+discovered. Declaring it here is not a second copy: the command registry is keyed by name, so
+`/goal` resolves to one command either way, and only the instance owning a session's directory
+drives that session's loop.
 
 ## Usage
 
