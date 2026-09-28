@@ -18,6 +18,29 @@ import { Goal, type GoalView } from "./rpc.js"
 
 const PANEL = "goal"
 
+/** Where the goal can appear. The panel gets the full view, the rest a summary. */
+const PLACEMENTS = ["panel", "footer", "composer", "sidebar"] as const
+type Placement = (typeof PLACEMENTS)[number]
+
+type Display = Record<Placement, boolean>
+
+/**
+ * Options set the *initial* placement; after the first run the durable store
+ * wins, so a choice made in the TUI survives restarts and is not silently
+ * reverted by editing opencode.json.
+ */
+const seedDisplay = (options: Record<string, unknown>): Display => {
+  const given = (options.display ?? {}) as Partial<Record<Placement, unknown>>
+  const pick = (key: Placement, fallback: boolean) =>
+    typeof given[key] === "boolean" ? (given[key] as boolean) : fallback
+  return {
+    panel: pick("panel", true),
+    footer: pick("footer", true),
+    composer: pick("composer", false),
+    sidebar: pick("sidebar", false),
+  }
+}
+
 type Changed = { sessionID: string; state: GoalView | null }
 type GetResult = { sessionID: string; state: GoalView | null }
 
@@ -34,6 +57,9 @@ export default Plugin.define({
   setup(context) {
     const rpc = context.client.rpc(Goal)
     const [states, setStates] = createSignal<Record<string, GoalView>>({})
+    const [display, setDisplay] = context.storage.store("display", {
+      initial: seedDisplay(context.options as Record<string, unknown>),
+    })
     /** Last terminal state toasted per session, so a repaint cannot repeat it. */
     const announced = new Map<string, string>()
 
@@ -177,16 +203,72 @@ export default Plugin.define({
       }),
     )
 
+    /** One line, for the slots with no room for the full view. */
+    const Compact = (props: { sessionID?: string }) => {
+      const view = () => (props.sessionID ? states()[props.sessionID] : undefined)
+      const word = (status: GoalView["status"]) =>
+        status === "active" ? "running" : status === "done" ? "achieved" : status === "blocked" ? "unachievable" : "paused"
+      const colour = (status: GoalView["status"]) =>
+        status === "active" || status === "done"
+          ? palette.success
+          : status === "blocked"
+            ? palette.error
+            : palette.warning
+      return (
+        <Show when={view()}>
+          {(current) => (
+            <text fg={colour(current().status)}>
+              ● goal {word(current().status)}
+              {current().status === "active" ? ` · turn ${current().turns}/${current().maxTurns}` : ""}
+            </text>
+          )}
+        </Show>
+      )
+    }
+
     guard("session.panel slot", () =>
       context.ui.slot({
         append: "session.panel",
-        render: (panel) => {
-          return (
-            <Show when={panel.name === PANEL}>
-              <Panel panel={panel} />
-            </Show>
-          )
-        },
+        render: (panel) => (
+          <Show when={panel.name === PANEL && display.panel}>
+            <Panel panel={panel} />
+          </Show>
+        ),
+      }),
+    )
+
+    // The three summary placements. Each is independent, so you can run with
+    // just the footer, just the panel, or both.
+    guard("prompt.footer.status slot", () =>
+      context.ui.slot({
+        append: "prompt.footer.status",
+        render: (input) => (
+          <Show when={display.footer}>
+            <Compact sessionID={input.sessionID} />
+          </Show>
+        ),
+      }),
+    )
+
+    guard("session.composer.top slot", () =>
+      context.ui.slot({
+        append: "session.composer.top",
+        render: (input) => (
+          <Show when={display.composer}>
+            <Compact sessionID={input.sessionID} />
+          </Show>
+        ),
+      }),
+    )
+
+    guard("sidebar.footer slot", () =>
+      context.ui.slot({
+        append: "sidebar.footer",
+        render: (input) => (
+          <Show when={display.sidebar}>
+            <Compact sessionID={input.sessionID} />
+          </Show>
+        ),
       }),
     )
 
@@ -296,6 +378,36 @@ export default Plugin.define({
           else ensurePanel("/goal panel")
         } catch {
           // Nothing sensible to do from a toggle.
+        }
+      }),
+    )
+
+    guard("display request", () =>
+      rpc.events.on("display", async (event) => {
+        if (!isLocal(event.location?.directory)) return
+        const { placement, enabled } = event.data as { placement?: string; enabled?: boolean }
+        try {
+          if (placement && (PLACEMENTS as readonly string[]).includes(placement)) {
+            const next = enabled ?? !display[placement as Placement]
+            await setDisplay((draft) => {
+              draft[placement as Placement] = next
+            })
+            context.ui.toast.show({
+              title: next ? "Goal shown" : "Goal hidden",
+              message: `${placement}`,
+              duration: 3000,
+            })
+            return
+          }
+          // No placement given: show where it currently is.
+          const on = PLACEMENTS.filter((key) => display[key]).join(", ")
+          context.ui.toast.show({
+            title: "Goal display",
+            message: on ? `shown in: ${on}` : "hidden everywhere",
+            duration: 5000,
+          })
+        } catch {
+          // Nothing to report.
         }
       }),
     )

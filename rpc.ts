@@ -121,5 +121,21 @@ export const Goal = Rpc.define({
      * selected and whether one is already showing.
      */
     panel: { schema: empty },
+    /**
+     * `/goal display [placement] [on|off]`. Placement and enabled are both
+     * optional: omitting the placement means "tell me", which the TUI answers
+     * with a dialog. The TUI owns these settings, so it is the one that applies
+     * them and persists the result.
+     */
+    display: {
+      schema: {
+        type: "object",
+        properties: {
+          placement: { type: "string" },
+          enabled: { type: "boolean" },
+        },
+        additionalProperties: false,
+      },
+    },
   },
 })

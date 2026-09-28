@@ -80,6 +80,9 @@ const FIELDS: Record<string, keyof Contract> = {
 const DEFAULT_MAX_TURNS = 20
 const DEFAULT_STALL_LIMIT = 2
 
+/** Where the goal can be shown. The TUI decides which are on; these are the names. */
+const DISPLAYS: readonly string[] = ["panel", "footer", "composer", "sidebar"]
+
 /** Small stable digest, so the repeat check does not store whole replies. */
 function digest(text: string): string {
   let h1 = 0x811c9dc5
@@ -468,7 +471,7 @@ export default Plugin.define({
           const sub = (head ?? "").toLowerCase()
           const argument = rest.join(" ").trim()
 
-          if (!argument && ["pause", "resume", "clear", "status", "panel"].includes(sub)) {
+          if (["pause", "resume", "clear", "status", "panel"].includes(sub) && !argument) {
             // A subcommand is a direct question, so it always answers — even when
             // the panel is open and already showing the same thing. Going quiet
             // here reads as the command being broken.
@@ -535,6 +538,39 @@ export default Plugin.define({
             }
             await write(sessionID, undefined)
             await note(sessionID, "Goal cleared.")
+            return
+          }
+
+          // `display` takes an optional argument, so it sits outside the
+          // no-argument branch above. Every form of it is handled here: an
+          // unrecognised placement must be rejected, never fall through to the
+          // goal parser and become a goal reading "display bogus off".
+          if (sub === "display") {
+            const session = (await ctx.session.get({ sessionID })) as {
+              location?: { directory?: string }
+            }
+            const directory = session?.location?.directory
+            if (!(directory && (await isTuiPresent(directory)))) {
+              await note(
+                sessionID,
+                "Where the goal is shown is a terminal-UI setting. Use /goal status here.",
+              )
+              return
+            }
+            const [placement, value] = argument.split(/\s+/).filter(Boolean)
+            if (placement && !DISPLAYS.includes(placement.toLowerCase())) {
+              await note(
+                sessionID,
+                `Unknown display "${placement}". Choose from: ${DISPLAYS.join(", ")}.`,
+              )
+              return
+            }
+            try {
+              await rpc.events.emit("display", {
+                ...(placement ? { placement: placement.toLowerCase() } : {}),
+                ...(value ? { enabled: !/^(off|false|no|0)$/i.test(value) } : {}),
+              })
+            } catch {}
             return
           }
 
