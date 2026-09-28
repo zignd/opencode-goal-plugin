@@ -276,6 +276,26 @@ export default Plugin.define({
      * toasts too. The documented home for it is an `app` slot render, which is
      * a real component.
      */
+    /** Open or close the panel, whichever is the opposite of now. */
+    const togglePanel = (why: string) => {
+      try {
+        if (context.ui.panel.current()?.name === PANEL) {
+          context.ui.panel.close()
+        } else {
+          ensurePanel(why)
+        }
+      } catch (error) {
+        // Nothing sensible to do from a toggle.
+      }
+    }
+
+    guard("panel request", () =>
+      rpc.events.on("panel", (event) => {
+        if (!isLocal(event.location?.directory)) return
+        togglePanel("/goal panel")
+      }),
+    )
+
     guard("app slot", () =>
       context.ui.slot({
       append: "app",
@@ -288,16 +308,7 @@ export default Plugin.define({
                 id: "goal.panel.toggle",
                 title: "Toggle goal panel",
                 slash: { name: "goalpanel" },
-                run: () => {
-                  try {
-                    if (context.ui.panel.current()?.name === PANEL) {
-                      context.ui.panel.close()
-                    } else {
-                      ensurePanel("toggle command")
-                    }
-                  } catch (error) {
-                  }
-                },
+                run: () => togglePanel("goalpanel"),
               },
             ],
           }))

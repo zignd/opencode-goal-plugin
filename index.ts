@@ -436,11 +436,27 @@ export default Plugin.define({
           const sub = (head ?? "").toLowerCase()
           const argument = rest.join(" ").trim()
 
-          if (!argument && ["pause", "resume", "clear", "status"].includes(sub)) {
+          if (!argument && ["pause", "resume", "clear", "status", "panel"].includes(sub)) {
             // A subcommand is a direct question, so it always answers — even when
             // the panel is open and already showing the same thing. Going quiet
             // here reads as the command being broken.
             const state = await read(sessionID)
+            if (sub === "panel") {
+              // Only a TUI can open a panel, so hand the request over. Resolving
+              // it server-side would mean pretending, and the user would see
+              // nothing happen.
+              if (await isAttached(sessionID)) {
+                try {
+                  await rpc.events.emit("panel", {})
+                } catch {}
+                return
+              }
+              await note(
+                sessionID,
+                "The goal panel is a terminal-UI feature. Use /goal status here, or open this session in the TUI.",
+              )
+              return
+            }
             if (sub === "status") {
               await note(sessionID, statusReport(state))
               return

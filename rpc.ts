@@ -98,5 +98,11 @@ export const Goal = Rpc.define({
   events: {
     /** Emitted whenever the server writes goal state. `state` is null once cleared. */
     changed: { schema: nullableState },
+    /**
+     * `/goal panel` arrives on the server, but only the TUI can open a panel, so
+     * the request is bounced across. Empty data: the host owns which panel is
+     * selected and whether one is already showing.
+     */
+    panel: { schema: empty },
   },
 })

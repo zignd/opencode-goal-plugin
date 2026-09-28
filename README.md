@@ -159,6 +159,7 @@ drives that session's loop.
 | `/goal pause` | Stop auto-continuation but keep the goal. |
 | `/goal resume` | Resume the loop with a fresh turn budget. |
 | `/goal clear` | Drop the goal entirely. |
+| `/goal panel` | Open or close the panel. TUI only; elsewhere it says so. |
 
 ### The session panel (TUI)
 
@@ -177,7 +178,8 @@ It shows the goal, the `verify:` line it is working toward, a turn counter, the 
 repeating counters when they are non-zero, and the judge's last reason. When the loop reaches
 `done`, `blocked` or paused, you get a toast instead of a message in the transcript.
 
-Dismiss the panel with its own control and bring it back with `/goalpanel`, which toggles.
+Dismiss the panel with its own control, or toggle it with `/goal panel`. `/goalpanel` remains as
+an alias.
 
 **What the panel changes.** With it open, the server stops posting the loop's notices into the
 session, because a synthetic session message is a real prompt and costs a model call. It also
