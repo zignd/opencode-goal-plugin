@@ -107,7 +107,7 @@ defaults:
 | `maxTurns` | `20` | Automatic continuation turns before the loop auto-pauses. The initial `/goal` turn is not counted, so the default allows 21 agent executions in total. See below. |
 | `stallLimit` | `2` | Consecutive turns that ran **no tools** before the loop is declared stalled. |
 | `judgeModel` | session model | Model used for the `done` / `continue` / `blocked` verdict. |
-| `forceInBand` | `false` | Keep posting the loop's notices into the session even when the TUI panel is open. |
+| `quiet` | `false` | Stop posting the loop's turn banner and completion notices into the transcript while the panel is open. |
 
 ### What a "turn" is
 
@@ -178,23 +178,20 @@ It shows the goal, the `verify:` line it is working toward, a turn counter, the 
 repeating counters when they are non-zero, and the judge's last reason. When the loop reaches
 `done`, `blocked` or paused, you get a toast instead of a message in the transcript.
 
-Dismiss the panel with its own control, or toggle it with `/goal panel`. `/goalpanel` remains as
-an alias.
+Dismiss the panel with its own control, or toggle it with `/goal panel`.
 
-**What the panel changes.** With it open, the server stops posting the loop's notices into the
-session, because a synthetic session message is a real prompt and costs a model call. It also
-drops the `↻ [continuing toward your standing goal — turn N/M]` banner from continuation
-prompts, so the transcript stays quiet. Both fall back automatically:
+**The panel adds to the transcript, it does not replace it.** The loop still writes a
+`↻ [continuing toward your standing goal — turn N/M]` banner on every continuation and a
+`✓ Goal achieved` / `🚫 Goal judged unachievable` / `⏸ Goal paused` notice when it stops, so
+scrolling back tells the story. The panel is the live view; the transcript is the record.
 
-- No TUI attached — desktop, the web client, `opencode run` — and the notices and the banner
-  come back, because otherwise a continuation would be indistinguishable from a message you
-  typed.
-- Panel closed — notices return immediately, since the panel detaches on unmount and nothing is
-  displaying them.
+Those notices cost a model call each, because a synthetic session message is a real prompt. Set
+`quiet: true` to suppress them while the panel is open, if you would rather have a silent
+transcript. It only takes effect when a panel is actually displaying the state, so it can never
+hide the loop in a headless client where nothing would be shown instead.
 
-A TUI only ever marks **its own location, and only the session its panel is showing**, as
-TUI-watched, so a terminal open in one project will not silence the notices for a headless run
-in another. Set `forceInBand: true` if you want the messages even with the panel open.
+A TUI only ever marks **its own location, and only the session its panel is showing**, so a
+terminal open in one project will not affect a headless run in another.
 
 > Editing `index.ts` or `rpc.ts` hot-reloads. Editing `tui.tsx` does **not** — restart the TUI
 > to pick it up, because the discovered `tui.ts` entrypoint is what gets watched.

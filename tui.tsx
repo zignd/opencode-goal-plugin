@@ -13,7 +13,7 @@ import { Goal, type GoalView } from "./rpc.js"
  * extra model calls.
  *
  * The panel opens itself when a goal starts. Dismiss it with the panel's own
- * control and bring it back with /goalpanel.
+ * control, or toggle it with /goal panel.
  */
 
 const PANEL = "goal"
@@ -288,54 +288,16 @@ export default Plugin.define({
       )
     }
 
-    /**
-     * The keymap layer is "owned by the calling component", and setup() has no
-     * component around it — registering one there throws "Keymap.Provider is
-     * missing" and takes the whole plugin down with it, taking the panel and the
-     * toasts too. The documented home for it is an `app` slot render, which is
-     * a real component.
-     */
-    /** Open or close the panel, whichever is the opposite of now. */
-    const togglePanel = (why: string) => {
-      try {
-        if (context.ui.panel.current()?.name === PANEL) {
-          context.ui.panel.close()
-        } else {
-          ensurePanel(why)
-        }
-      } catch (error) {
-        // Nothing sensible to do from a toggle.
-      }
-    }
-
     guard("panel request", () =>
       rpc.events.on("panel", (event) => {
         if (!isLocal(event.location?.directory)) return
-        togglePanel("/goal panel")
-      }),
-    )
-
-    guard("app slot", () =>
-      context.ui.slot({
-      append: "app",
-      render: () => {
         try {
-          context.keymap.layer(() => ({
-            mode: "global",
-            commands: [
-              {
-                id: "goal.panel.toggle",
-                title: "Toggle goal panel",
-                slash: { name: "goalpanel" },
-                run: () => togglePanel("goalpanel"),
-              },
-            ],
-          }))
-        } catch (error) {
+          if (context.ui.panel.current()?.name === PANEL) context.ui.panel.close()
+          else ensurePanel("/goal panel")
+        } catch {
+          // Nothing sensible to do from a toggle.
         }
-        return null
-      },
-    }),
+      }),
     )
 
     return () => {

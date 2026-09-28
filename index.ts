@@ -265,8 +265,18 @@ export default Plugin.define({
     const stallLimit =
       typeof ctx.options.stallLimit === "number" ? ctx.options.stallLimit : DEFAULT_STALL_LIMIT
     const judgeOverride = ctx.options.judgeModel as ModelRef | undefined
-    // Escape hatch: keep the in-band session messages even with the TUI open.
-    const forceInBand = ctx.options.forceInBand === true
+    /**
+     * Whether to drop the loop's reporting from the transcript. Off by default:
+     * the panel is an addition to the chat, not a replacement for it, and a
+     * finished goal leaving no mark in the history is disorienting when you
+     * scroll back later. Set `quiet: true` to suppress it while a panel is up.
+     *
+     * Only ever effective when a panel is actually displaying the state, so
+     * turning it on in a headless client cannot hide the loop entirely.
+     */
+    const quietOption = ctx.options.quiet === true
+    const suppressed = async (sessionID: string) =>
+      quietOption && (await isAttached(sessionID))
     const judging = new Set<string>()
 
     const key = (sessionID: string) => `goal:${sessionID}`
@@ -418,7 +428,7 @@ export default Plugin.define({
      */
     const note = (sessionID: string, text: string) => ctx.session.synthetic({ sessionID, text })
     const say = async (sessionID: string, text: string) => {
-      if (forceInBand || !(await isAttached(sessionID))) await note(sessionID, text)
+      if (!(await suppressed(sessionID))) await note(sessionID, text)
     }
     const terminal = (sessionID: string, text: string) =>
       say(sessionID, `${text}\n\n(The goal loop has stopped. Do not start new work; reply in one short sentence.)`)
@@ -518,7 +528,7 @@ export default Plugin.define({
                 text: continuationPrompt(
                   { ...resumed, turns: 1 },
                   "resumed by the user",
-                  await isAttached(sessionID),
+                  await suppressed(sessionID),
                 ),
               })
               return
@@ -668,7 +678,7 @@ export default Plugin.define({
           // itself already carries the judge's reason.
           await ctx.session.prompt({
             sessionID,
-            text: continuationPrompt(next, verdict.reason, await isAttached(sessionID)),
+            text: continuationPrompt(next, verdict.reason, await suppressed(sessionID)),
           })
         } catch (error) {
           const current = await read(sessionID)
