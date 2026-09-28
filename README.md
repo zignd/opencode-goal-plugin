@@ -187,7 +187,8 @@ prompts, so the transcript stays quiet. Both fall back automatically:
 - No TUI attached — desktop, the web client, `opencode run` — and the notices and the banner
   come back, because otherwise a continuation would be indistinguishable from a message you
   typed.
-- Panel closed — notices return too, since nothing is displaying them.
+- Panel closed — notices return immediately, since the panel detaches on unmount and nothing is
+  displaying them.
 
 A TUI only ever marks **its own location, and only the session its panel is showing**, as
 TUI-watched, so a terminal open in one project will not silence the notices for a headless run
@@ -198,8 +199,10 @@ in another. Set `forceInBand: true` if you want the messages even with the panel
 
 ### Querying a goal while it is running
 
-`/goal status`, `/goal pause` and `/goal clear` all work while the loop is running. None of
-them resets the turn counter, and `pause` and `clear` stop the loop on the next boundary.
+`/goal status`, `/goal pause`, `/goal resume` and `/goal clear` all work while the loop is
+running. They always answer in the transcript, panel open or not — they are replies to
+something you typed, not loop reporting. None of them resets the turn counter, and `pause` and
+`clear` stop the loop on the next boundary.
 
 There is one caveat, and it is a limitation of the host rather than a choice. OpenCode gives a
 plugin no way to write a message into a session without starting an execution, so the status
