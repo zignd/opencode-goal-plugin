@@ -104,9 +104,45 @@ defaults:
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `maxTurns` | `20` | Continuation turns before the loop auto-pauses. |
+| `maxTurns` | `20` | Automatic continuation turns before the loop auto-pauses. The initial `/goal` turn is not counted, so the default allows 21 agent executions in total. See below. |
 | `stallLimit` | `2` | Consecutive turns that ran **no tools** before the loop is declared stalled. |
 | `judgeModel` | session model | Model used for the `done` / `continue` / `blocked` verdict. |
+
+### What a "turn" is
+
+A **turn** is one complete run of the agent loop. One prompt goes in, the model works —
+calling as many tools as it needs — and produces a final reply. That reply ends the turn,
+and OpenCode emits `session.execution.succeeded`, which is the event this plugin waits for
+before asking the judge anything.
+
+A turn is **not** a tool call, and **not** a message. A single turn can contain a dozen tool
+calls and a long final answer, and it still counts once.
+
+`maxTurns` counts only the **continuation** turns that the plugin injects after the judge
+answers `continue`. The original `/goal <text>` turn is turn zero and is not counted, so the
+default budget looks like this:
+
+```text
+ 1        the /goal prompt itself
++ 20      automatic continuations, numbered 1/20 … 20/20
+─────
+ 21      agent executions before the loop pauses
+```
+
+The judge is consulted once per settled turn, including the last one, so a full budget is 21
+agent executions and 21 judge calls.
+
+You can watch the counter in the transcript:
+
+```text
+↻ [continuing toward your standing goal — turn 3/20]
+```
+
+and in `/goal status` as `3/20 turns used`. `/goal resume` resets it to zero, which hands you
+another full budget.
+
+Treat the budget as a ceiling, not a target. Every turn is a real agent execution plus a
+judge call, so in practice the `done`, stall and repetition guards fire long before it does.
 
 If you are content with the defaults, omit this block entirely — the directory is still
 discovered. Declaring it here is not a second copy: the command registry is keyed by name, so
@@ -157,7 +193,7 @@ The point of this plugin is that it terminates. Five conditions, checked in orde
 | 2 | Judge returns `blocked` — impossible, out of scope, needs credentials or hardware you do not have, or the agent is going in circles | model |
 | 3 | **Stall** — `stallLimit` consecutive turns ran no tools at all, so nothing changed however confident the prose | deterministic |
 | 4 | **Repetition** — the agent produced the same reply twice running | deterministic |
-| 5 | **Budget** — `maxTurns` continuations spent | deterministic |
+| 5 | **Budget** — `maxTurns` continuation turns spent (21 executions by default) | deterministic |
 
 Conditions 3–5 do not consult the model. This is deliberate: in testing, a weak judge model
 answered `continue` to twenty byte-identical replies and happily spent the entire budget. The
