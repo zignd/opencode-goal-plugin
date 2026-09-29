@@ -99,3 +99,17 @@ export function applyAll(enabled: boolean): Display {
   return { panel: enabled, footer: enabled, composer: enabled, sidebar: enabled }
 }
 
+/**
+ * Apply a mutation to a display and return the complete next value.
+ *
+ * The UI shows all four placements but only ever changes the named ones, so persisting
+ * has to write the *whole* value rather than the keys the caller happened to touch.
+ * Returning a fresh object rather than editing in place also gives the UI something new
+ * to compare, which is what makes a change visible on the frame it happens.
+ */
+export function applyMutation(current: Display, mutate: (draft: Display) => void): Display {
+  const next: Display = { ...current }
+  mutate(next)
+  return { panel: next.panel, footer: next.footer, composer: next.composer, sidebar: next.sidebar }
+}
+

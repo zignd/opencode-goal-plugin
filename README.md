@@ -300,6 +300,23 @@ non-trivial. Comma or space separated, with an optional trailing `on`/`off`:
 /goal display footer,sidebar off      turn both off, leave the rest alone
 ```
 
+A change appears immediately, without reopening anything.
+
+That took a fix worth recording, because the cause was not obvious from the symptom.
+`context.storage.store` is durable but **not reactive**, and a slot's `render` runs once, so
+`<Show when={display.panel}>` read a snapshot of the placements and never re-read it. The
+visible effect was that a placement change only appeared after something forced the slot to
+re-render — in practice, toggling the panel with `/goal panel`, which is exactly the manual
+workaround that should not be needed.
+
+So the stored value is mirrored into a signal, which is the mechanism the goal state already
+used and which demonstrably re-renders in this host. The store stays the single durable
+record; the signal is only what the UI reads, and it leads the write so a change shows on
+the frame it happens rather than after the storage round trip. Because the UI shows four
+placements but only ever changes the named one, `applyMutation` returns the **whole** value
+rather than the keys that changed — otherwise an untouched placement would silently revert on
+the next write. Both properties are pinned in `test/display.test.ts`.
+
 With an explicit `on`/`off` the named placements are set and the rest untouched; without one,
 each named placement toggles.
 

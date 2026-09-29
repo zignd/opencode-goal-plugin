@@ -10,6 +10,7 @@ import { describe, test } from "node:test"
 import assert from "node:assert/strict"
 import {
   applyAll,
+  applyMutation,
   applyParsed,
   applySet,
   DEFAULTS,
@@ -268,5 +269,39 @@ describe("summarise", () => {
 
   test("says so when none are", () => {
     assert.equal(summarise(applyAll(false)), "hidden everywhere")
+  })
+})
+
+describe("applyMutation", () => {
+  test("returns every placement, not only the ones changed", () => {
+    // The UI shows all four but only ever changes the named one, so persistence has to
+    // write the whole value or an untouched placement silently reverts.
+    const next = applyMutation(DEFAULTS, (draft) => {
+      draft.panel = false
+    })
+    assert.equal(next.panel, false)
+    assert.equal(next.footer, DEFAULTS.footer)
+    assert.equal(next.composer, DEFAULTS.composer)
+    assert.equal(next.sidebar, DEFAULTS.sidebar)
+  })
+
+  test("does not edit the value it was given", () => {
+    const before = { ...DEFAULTS }
+    applyMutation(before, (draft) => {
+      draft.sidebar = true
+    })
+    assert.deepEqual(before, DEFAULTS)
+  })
+
+  test("returns a new object, so a change is visible when compared", () => {
+    // A mutation in place would leave the UI looking at the same reference, which is
+    // how a change fails to appear on the frame it happens.
+    const current = { ...DEFAULTS }
+    const next = applyMutation(current, (draft) => {
+      draft.composer = true
+    })
+    assert.notEqual(next, current)
+    assert.equal(next.composer, true)
+    assert.equal(current.composer, false)
   })
 })

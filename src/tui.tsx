@@ -4,6 +4,7 @@ import { Goal, HELP_TEXT as HELP, type GoalView } from "./rpc.js"
 import { formatTurns } from "./budget.js"
 import {
   applyAll,
+  applyMutation,
   applyParsed,
   applySet,
   describe,
@@ -54,9 +55,33 @@ export default Plugin.define({
   setup(context) {
     const rpc = context.client.rpc(Goal)
     const [states, setStates] = createSignal<Record<string, GoalView>>({})
-    const [display, setDisplay] = context.storage.store("display", {
+    /**
+     * Where the goal is shown.
+     *
+     * `storage.store` is the durable record, but it is not reactive: a slot's `render`
+     * runs once, so `<Show when={display.panel}>` read a snapshot and never re-read it.
+     * The result was that a placement change only appeared after something forced the
+     * slot to re-render — in practice, toggling the panel with `/goal panel`, which is
+     * exactly the manual workaround this is meant to remove.
+     *
+     * So the stored value is mirrored into a signal, the same mechanism the goal state
+     * already uses and which is known to re-render here. The store stays the single
+     * durable record; the signal is only what the UI reads.
+     */
+    const [storedDisplay, setStoredDisplay] = context.storage.store("display", {
       initial: seedDisplay(context.options as Record<string, unknown>),
     })
+    const asDisplay = (value: unknown): Display => seedDisplay(value)
+    const [display, setDisplayNow] = createSignal<Display>(asDisplay(storedDisplay))
+    /** Update the signal immediately, then persist. The signal leads so the change is
+     *  visible on this frame rather than after the storage round trip. */
+    const setDisplay = async (mutate: (draft: Display) => void): Promise<void> => {
+      const next = applyMutation(asDisplay(storedDisplay), mutate)
+      setDisplayNow(next)
+      await setStoredDisplay((draft: Display) => {
+        for (const key of PLACEMENTS) draft[key] = next[key]
+      })
+    }
     /** Last terminal state toasted per session, so a repaint cannot repeat it. */
     const announced = new Map<string, string>()
 
@@ -227,7 +252,7 @@ export default Plugin.define({
       context.ui.slot({
         append: "session.panel",
         render: (panel) => (
-          <Show when={panel.name === PANEL && display.panel}>
+          <Show when={panel.name === PANEL && display().panel}>
             <Panel panel={panel} />
           </Show>
         ),
@@ -240,7 +265,7 @@ export default Plugin.define({
       context.ui.slot({
         append: "prompt.footer.status",
         render: (input) => (
-          <Show when={display.footer}>
+          <Show when={display().footer}>
             <Compact sessionID={input.sessionID} />
           </Show>
         ),
@@ -251,7 +276,7 @@ export default Plugin.define({
       context.ui.slot({
         append: "session.composer.top",
         render: (input) => (
-          <Show when={display.composer}>
+          <Show when={display().composer}>
             <Compact sessionID={input.sessionID} />
           </Show>
         ),
@@ -262,7 +287,7 @@ export default Plugin.define({
       context.ui.slot({
         append: "sidebar.footer",
         render: (input) => (
-          <Show when={display.sidebar}>
+          <Show when={display().sidebar}>
             <Compact sessionID={input.sessionID} />
           </Show>
         ),
@@ -412,7 +437,7 @@ export default Plugin.define({
         title: "Where should the goal be shown?",
         options: [
           ...PLACEMENTS.map((key) => ({
-            title: `${display[key] ? "on " : "off"}  ${key}`,
+            title: `${display()[key] ? "on " : "off"}  ${key}`,
             value: key,
             description: PLACEMENT_HELP[key],
           })),
@@ -425,7 +450,7 @@ export default Plugin.define({
       })
       if (choice === undefined) return
       const next =
-        choice === "__off" ? applyAll(false) : applySet(display, choice, !display[choice])
+        choice === "__off" ? applyAll(false) : applySet(display(), choice, !display()[choice])
       await setDisplay((draft) => {
         for (const key of PLACEMENTS) draft[key] = next[key]
       })
@@ -503,7 +528,7 @@ export default Plugin.define({
         }
 
         if (named.length > 0) {
-          const next = applyParsed(display, { placements: named, enabled, unknown: [] })
+          const next = applyParsed(display(), { placements: named, enabled, unknown: [] })
           await setDisplay((draft) => {
             for (const key of named) draft[key] = next[key]
           })
