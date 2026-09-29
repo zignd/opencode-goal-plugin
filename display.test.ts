@@ -6,10 +6,12 @@
  */
 import {
   applyChoice,
+  applyParsed,
   applySet,
   DEFAULTS,
   describe,
   isPlacement,
+  parseDisplayArgument,
   seedDisplay,
   type Display,
 } from "./display.ts"
@@ -80,6 +82,61 @@ const original: Display = { ...both }
 applyChoice(original, "sidebar")
 applySet(original, "panel", false)
 check("input untouched", original, both)
+
+console.log("parseDisplayArgument")
+check("single placement", parseDisplayArgument("panel"), { placements: ["panel"], unknown: [] })
+check("comma list", parseDisplayArgument("panel,composer,sidebar"), {
+  placements: ["panel", "composer", "sidebar"],
+  unknown: [],
+})
+check("space list", parseDisplayArgument("panel composer"), {
+  placements: ["panel", "composer"],
+  unknown: [],
+})
+check("mixed separators", parseDisplayArgument("panel, composer sidebar"), {
+  placements: ["panel", "composer", "sidebar"],
+  unknown: [],
+})
+check("explicit off", parseDisplayArgument("footer off"), { placements: ["footer"], enabled: false, unknown: [] })
+check("explicit on", parseDisplayArgument("footer on"), { placements: ["footer"], enabled: true, unknown: [] })
+check("truthy synonyms", parseDisplayArgument("footer yes"), { placements: ["footer"], enabled: true, unknown: [] })
+check("falsy synonyms", parseDisplayArgument("footer no"), { placements: ["footer"], enabled: false, unknown: [] })
+check("off before list", parseDisplayArgument("off panel,sidebar"), {
+  placements: ["panel", "sidebar"],
+  enabled: false,
+  unknown: [],
+})
+check("duplicates collapse", parseDisplayArgument("panel,panel"), { placements: ["panel"], unknown: [] })
+check("empty argument", parseDisplayArgument(""), { placements: [], unknown: [] })
+check("unknown reported", parseDisplayArgument("nope"), { placements: [], unknown: ["nope"] })
+check("known and unknown", parseDisplayArgument("panel,nope"), { placements: ["panel"], unknown: ["nope"] })
+
+console.log("applyParsed")
+const start: Display = { panel: true, footer: true, composer: false, sidebar: false }
+check(
+  "no on/off toggles each named",
+  applyParsed(start, parseDisplayArgument("panel,composer")),
+  { panel: false, footer: true, composer: true, sidebar: false },
+)
+check("explicit off sets only the named", applyParsed(start, parseDisplayArgument("panel,composer off")), {
+  panel: false,
+  footer: true,
+  composer: false,
+  sidebar: false,
+})
+check("explicit on sets only the named", applyParsed(start, parseDisplayArgument("sidebar on")), {
+  panel: true,
+  footer: true,
+  composer: false,
+  sidebar: true,
+})
+check("everything off in one go", applyParsed(start, parseDisplayArgument("panel,footer,composer,sidebar off")), {
+  panel: false,
+  footer: false,
+  composer: false,
+  sidebar: false,
+})
+check("no placements changes nothing", applyParsed(start, parseDisplayArgument("")), start)
 
 console.log("misc")
 check("isPlacement accepts known", isPlacement("panel"), true)

@@ -27,6 +27,63 @@ export function seedDisplay(given: unknown): Display {
 export const isPlacement = (value: string): value is Placement =>
   (PLACEMENTS as readonly string[]).includes(value)
 
+const TRUTHY = /^(on|true|yes|1)$/i
+const FALSY = /^(off|false|no|0)$/i
+
+export type ParsedDisplay = {
+  /** Placements named on the command line, in order, deduplicated. */
+  placements: Placement[]
+  /** Explicit on/off if given, otherwise undefined meaning "toggle". */
+  enabled?: boolean
+  /** Anything the user typed that is not a placement, for the error message. */
+  unknown: string[]
+}
+
+/**
+ * Parse `/goal display <where>... [on|off]`. Accepts a comma or space separated
+ * list so several can be set at once, which is the whole point: a picker that
+ * closes on the first click would need reopening per change.
+ */
+export function parseDisplayArgument(argument: string): ParsedDisplay {
+  const tokens = argument
+    .split(/[\s,]+/)
+    .map((token) => token.trim())
+    .filter(Boolean)
+  const placements: Placement[] = []
+  const unknown: string[] = []
+  let enabled: boolean | undefined
+
+  for (const token of tokens) {
+    const lower = token.toLowerCase()
+    if (TRUTHY.test(lower)) {
+      enabled = true
+      continue
+    }
+    if (FALSY.test(lower)) {
+      enabled = false
+      continue
+    }
+    if (isPlacement(lower)) {
+      if (!placements.includes(lower)) placements.push(lower)
+    } else {
+      unknown.push(token)
+    }
+  }
+  return { placements, ...(enabled === undefined ? {} : { enabled }), unknown }
+}
+
+/**
+ * Apply a parsed command. With an explicit on/off the named placements are set
+ * and the rest are untouched; without one, each named placement is toggled.
+ */
+export function applyParsed(current: Display, parsed: ParsedDisplay): Display {
+  let next = current
+  for (const key of parsed.placements) {
+    next = applySet(next, key, parsed.enabled ?? !next[key])
+  }
+  return next
+}
+
 /**
  * Apply a choice from the picker. Selecting a placement toggles only that one;
  * "__off" is the only choice that turns everything off. Merging those two cases

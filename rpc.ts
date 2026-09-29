@@ -155,7 +155,8 @@ export const Goal = Rpc.define({
       schema: {
         type: "object",
         properties: {
-          placement: { type: "string" },
+          /** A picker closes on the first pick, so several can be named at once. */
+          placements: { type: "array", items: { type: "string" } },
           enabled: { type: "boolean" },
         },
         additionalProperties: false,

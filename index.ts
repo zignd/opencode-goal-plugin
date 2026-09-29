@@ -1,6 +1,8 @@
 import { realpathSync } from "node:fs"
 import { Plugin } from "@opencode/plugin"
 import { Goal, HELP_TEXT, type GoalView } from "./rpc.js"
+// Pure, no JSX, so the server can share the parser with the TUI.
+import { parseDisplayArgument } from "./display.js"
 
 /**
  * Persistent goals, modelled on the Ralph loop.
@@ -576,18 +578,18 @@ export default Plugin.define({
               )
               return
             }
-            const [placement, value] = argument.split(/\s+/).filter(Boolean)
-            if (placement && !DISPLAYS.includes(placement.toLowerCase())) {
+            const parsed = parseDisplayArgument(argument)
+            if (parsed.unknown.length) {
               await note(
                 sessionID,
-                `Unknown display "${placement}". Choose from: ${DISPLAYS.join(", ")}.`,
+                `Unknown display "${parsed.unknown[0]}". Choose from: ${DISPLAYS.join(", ")}.`,
               )
               return
             }
             try {
               await rpc.events.emit("display", {
-                ...(placement ? { placement: placement.toLowerCase() } : {}),
-                ...(value ? { enabled: !/^(off|false|no|0)$/i.test(value) } : {}),
+                placements: parsed.placements,
+                ...(parsed.enabled === undefined ? {} : { enabled: parsed.enabled }),
               })
             } catch {}
             return

@@ -3,7 +3,7 @@ import { createEffect, createSignal, onCleanup, Show } from "solid-js"
 import { Goal, HELP_TEXT as HELP, type GoalView } from "./rpc.js"
 import {
   applyChoice,
-  applySet,
+  applyParsed,
   describe,
   isPlacement,
   PLACEMENTS,
@@ -384,14 +384,20 @@ export default Plugin.define({
     guard("display request", () =>
       rpc.events.on("display", async (event) => {
         if (!isLocal(event.location?.directory)) return
-        const { placement, enabled } = event.data as { placement?: string; enabled?: boolean }
+        const { placements, enabled } = event.data as {
+          placements?: string[]
+          enabled?: boolean
+        }
+        const named = (placements ?? []).filter(isPlacement) as Placement[]
+
         // Every branch delegates to display.ts, which has its own tests. The
         // picker logic was previously inline and could only be checked by a
         // person clicking through the dialog.
 
-        // No placement: a settings query deserves a list you can act on, not a
-        // toast that vanishes before it is read.
-        if (!placement) {
+        // No placement named: a settings query deserves a list you can act on,
+        // not a toast that vanishes before it is read. It closes on the first
+        // pick, so use `/goal display a,b` to change several at once.
+        if (named.length === 0) {
           try {
             const choice = await context.ui.dialog.select<Choice>({
               title: "Where should the goal be shown?",
@@ -424,19 +430,19 @@ export default Plugin.define({
           }
         }
 
-        if (placement && isPlacement(placement)) {
-          const next = applySet(display, placement, enabled ?? !display[placement])
+        if (named.length > 0) {
+          const next = applyParsed(display, { placements: named, enabled, unknown: [] })
           await setDisplay((draft) => {
-            draft[placement] = next[placement]
+            for (const key of named) draft[key] = next[key]
           })
           context.ui.toast.show({
-            title: next[placement] ? "Goal shown" : "Goal hidden",
-            message: placement,
+            title: "Goal display",
+            message: describe(next),
             duration: 3000,
           })
           return
         }
-        if (placement) {
+        if ((placements ?? []).length > 0) {
           context.ui.toast.show({
             title: "Unknown display",
             message: `Choose from: ${PLACEMENTS.join(", ")}`,
