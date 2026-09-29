@@ -206,9 +206,10 @@ It applies to the running goal immediately and to every goal set afterwards in t
 | Still stops it | |
 | --- | --- |
 | The judge says `done` | the goal is met, with evidence |
-| The judge says `blocked` | the goal is unreachable, or the agent is going in circles |
+| The judge says `blocked` | the goal is unreachable, on goal-level evidence |
 | Stall guard | `stallLimit` consecutive turns with no tool calls |
 | Repetition guard | the same reply twice running |
+| Polling guard | 3 turns that re-read an unchanged result |
 | You | `/goal pause`, `/goal clear`, or <kbd>esc</kbd> |
 
 So an agent that keeps making small, genuine-looking progress can now run indefinitely. Nothing
@@ -366,26 +367,60 @@ Only these exact prefixes are recognised, so an ordinary goal containing a colon
 
 ## How the loop stops
 
-The point of this plugin is that it terminates. Five conditions, checked in order:
+The point of this plugin is that it terminates. Six conditions, checked in order:
 
 | # | Condition | Kind |
 | --- | --- | --- |
 | 1 | Judge returns `done` — the reply carries concrete evidence, such as a passing command and its output | model |
-| 2 | Judge returns `blocked` — impossible, out of scope, needs credentials or hardware you do not have, or the agent is going in circles | model |
+| 2 | Judge returns `blocked` — impossible, out of scope, needs credentials or hardware you do not have | model |
 | 3 | **Stall** — `stallLimit` consecutive turns ran no tools at all, so nothing changed however confident the prose | deterministic |
 | 4 | **Repetition** — the agent produced the same reply twice running | deterministic |
-| 5 | **Budget** — `maxTurns` continuation turns spent (21 executions by default) | deterministic |
+| 5 | **Polling** — 3 turns ran tools and read back the same unchanged result | deterministic |
+| 6 | **Budget** — `maxTurns` continuation turns spent (21 executions by default) | deterministic |
 
-Conditions 3–5 do not consult the model. This is deliberate: in testing, a weak judge model
+Conditions 3–6 do not consult the model. This is deliberate: in testing, a weak judge model
 answered `continue` to twenty byte-identical replies and happily spent the entire budget. The
 deterministic guards are what actually stopped it, in two turns and about $0.004 instead of
 twenty turns and roughly $0.02. Treat the judge's `blocked` verdict as a useful fourth opinion,
 not as the safety net.
 
+### `blocked` means the goal, not the turn
+
+The one rule worth stating on its own, because getting it wrong stops work that would have
+finished. An earlier version told the judge to answer `blocked` when "the loop is going in
+circles". That mapped a **turn-level** observation onto a **goal-level** verdict, and the
+failure mode was concrete: an agent waiting on a five-minute build spends each turn reading
+an unchanged log, and the judge — seeing a turn that changed nothing — declared the whole
+goal unachievable and paused. The work was not unachievable; the agent was waiting.
+
+So repetition is now explicitly **not** a reason to answer `blocked`, however many turns it
+has happened, because repetition is recoverable: the next turn can do something different. A
+turn that checks on work already in flight is **waiting**, not circling, and the judge is told
+so and told not to assume work did *not* happen off-screen.
+
+### The polling guard
+
+The stall and repetition guards miss a specific shape. An agent waiting on a long job says
+something different every turn (so the reply digest moves) and calls a tool every turn (so
+the tool count is non-zero), while learning nothing. Only the model noticed, and it reached
+for the terminal verdict.
+
+So the loop also digests **what the tool calls reported**, ignoring the commands that
+produced them, and pauses after three turns whose observation is unchanged. Its message says
+the work is not moving, says to wait for a running command rather than re-read it, and says
+plainly that this is not a statement about whether the goal is reachable.
+
+It fails open: an unrecognised tool-state shape yields an empty digest and the guard stays
+quiet, because a heuristic that pauses a loop on a guess is worse than one that misses.
+
 ## Caveats
 
 - **The judge is only as good as its model.** A weak judge is permissive. Set `judgeModel` to
   something small and sharp, and expect to use `/goal status` to sanity-check its verdicts.
+- **A `blocked` verdict is worth reading twice.** It means the goal looks unreachable, which
+  is a strong claim resting on one model call. If the agent was mid-way through a long
+  command, a large batch, or a build, the more likely story is that it was waiting and the
+  judge read a quiet turn as a dead end. `/goal resume` costs nothing but the turn.
 - **Your agent model must actually use tools.** If the session model narrates intentions
   without calling tools, the stall guard fires after two turns. That is the guard working, but
   it means the goal will not get done.

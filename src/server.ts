@@ -1,6 +1,7 @@
 import { realpathSync } from "node:fs"
 import { Plugin } from "@opencode/plugin"
 import { Goal, HELP_TEXT, type GoalView } from "./rpc.js"
+import { observationOf } from "./observation.js"
 import {
   budgetLabel,
   formatTurns,
@@ -83,6 +84,11 @@ type GoalState = {
   /** Digest of the previous turn's reply, to spot a loop the judge may miss. */
   lastDigest?: string
   repeats: number
+  /** Digest of the previous turn's tool results, to spot polling that changes nothing.
+   *  Distinct from `lastDigest`: an agent can vary its prose every turn and still be
+   *  reading the same unchanged output, which is how waiting gets mistaken for spinning. */
+  lastObservation?: string
+  observing: number
   reason?: string
 }
 
@@ -169,6 +175,7 @@ function toView(state: GoalState): Omit<GoalView, "sessionID"> {
     maxTurns: state.maxTurns,
     stalled: state.stalled ?? 0,
     repeats: state.repeats ?? 0,
+    observing: state.observing ?? 0,
     reason: state.reason ?? "",
     verification: state.contract.verification ?? "",
     updatedAt: Date.now(),
@@ -185,6 +192,7 @@ const JUDGE_PROMPT = `You are a strict completion judge for an autonomous coding
 Turn {{TURN}} of at most {{MAX_TURNS}} have been spent on this goal.
 Tool calls made in the turn you are judging: {{TOOLCALLS}}
 Consecutive turns that changed nothing at all: {{STALLED}}
+Consecutive turns that repeated one observation without a result changing: {{OBSERVING}}
 Your verdict on the previous turn was: "continue", because: {{PREVIOUS}}
 </loop state>
 
@@ -198,10 +206,12 @@ Reply with exactly one line of strict JSON and nothing else:
 Rules:
 
 - "done" ONLY when the response carries concrete evidence the whole goal is satisfied: a command that passed along with its output, files that were actually created or changed, a test suite that is green. A claim, a plan, an intention, or "I will now..." is never done. If the goal's own proof condition is named above, that specific proof must be present.
-- "blocked" when the goal cannot be concluded as written. That covers a goal that is impossible, self-contradictory, outside the repository's scope, or dependent on credentials, hardware, or decisions the agent does not have. It also covers a goal asking for something no amount of the agent's work can produce, even when the agent has not admitted that yet.
-- "blocked" when the loop is going in circles: this turn repeats the previous turn's promise, edit, or failing command without new information, or the turn changed nothing while earlier turns did not either. Judge the loop state above, not just the prose.
-- "continue" when real, non-repeating progress is still possible. Slow is fine. Stalled is not.
-- Judge only what is in front of you. Do not assume work happened off-screen.`
+- "blocked" ONLY when the GOAL cannot be concluded as written: impossible, self-contradictory, outside the repository's scope, or dependent on credentials, hardware, or decisions the agent does not have. It also covers a goal asking for something no amount of the agent's work can produce, even when the agent has not admitted that yet.
+- "blocked" requires goal-level evidence. A turn that was unproductive, slow, repeated, or made no change is evidence about THIS TURN, never about whether the goal is reachable. Repetition is recoverable — the next turn can do something different — so repetition alone must never produce "blocked", however many turns it has happened.
+- "continue" when real progress is still possible, AND when this turn was unproductive. Slow is fine. Waiting is fine. Stalled is not.
+- A turn that checked on work already in flight — a background build, a long test run, a command started earlier — is WAITING, not going in circles, unless the underlying work shows no progress at all across several turns. Do not read a repeated read-only check as a dead goal.
+- If the loop state above suggests repetition, the correct verdict is still "continue": say in the reason what the agent should change (do different work, or stop polling and wait for the result), and let the next turn act on it.
+- Judge only what is in front of you. Do not assume work happened off-screen. Equally, do not assume work did NOT happen off-screen: a long-running command may still be in flight.`
 
 function continuationPrompt(state: GoalState, reason: string, quiet: boolean): string {
   // With a TUI watching, the panel already shows which turn this is, so the
@@ -235,7 +245,7 @@ function statusReport(state: GoalState | undefined): string {
 async function lastAssistantTurn(
   ctx: any,
   sessionID: string,
-): Promise<{ text: string; model?: ModelRef; toolCalls: number }> {
+): Promise<{ text: string; model?: ModelRef; toolCalls: number; observation: string }> {
   const messages = (await ctx.session.context({ sessionID })) as readonly any[]
 
   // A turn is every assistant message after the last user or synthetic input.
@@ -251,10 +261,11 @@ async function lastAssistantTurn(
     }
   }
 
+  const turn = messages.slice(start)
   let model: ModelRef | undefined
   let toolCalls = 0
   let text = ""
-  for (const message of messages.slice(start)) {
+  for (const message of turn) {
     if (message?.type !== "assistant") continue
     model ??= message.model as ModelRef | undefined
     const content = (message.content ?? []) as readonly any[]
@@ -266,7 +277,7 @@ async function lastAssistantTurn(
       .trim()
     if (said) text = said
   }
-  return { text, model, toolCalls }
+  return { text, model, toolCalls, observation: digest(observationOf(turn)) }
 }
 
 function parseVerdict(raw: string): { verdict: Verdict; reason: string } {
@@ -615,6 +626,7 @@ export default Plugin.define({
         .replace("{{MAX_TURNS}}", budgetLabel(state.maxTurns))
         .replace("{{TOOLCALLS}}", String(toolCalls))
         .replace("{{STALLED}}", String(state.stalled ?? 0))
+        .replace("{{OBSERVING}}", String(state.observing ?? 0))
         .replace("{{PREVIOUS}}", state.reason || "(this is the first turn)")
         .replace("{{RESPONSE}}", text.slice(-4000) || "(the agent produced no text this turn)")
       const result = await ctx.generate.text({ model: chosen, prompt })
@@ -710,7 +722,9 @@ export default Plugin.define({
                 turns: 0,
                 stalled: 0,
                 repeats: 0,
+                observing: 0,
                 lastDigest: undefined,
+                lastObservation: undefined,
                 reason: undefined,
               }
               await write(sessionID, resumed)
@@ -898,7 +912,9 @@ export default Plugin.define({
             maxTurns: budget,
             stalled: 0,
             repeats: 0,
+            observing: 0,
             lastDigest: undefined,
+            lastObservation: undefined,
             reason: undefined,
           }
           await write(sessionID, state)
@@ -976,23 +992,40 @@ export default Plugin.define({
           // Two deterministic no-progress checks. These, not the judge, are what
           // actually stop a runaway: a weak judge model will happily answer
           // "continue" to twenty identical replies.
-          const { toolCalls, text: replyText } = await lastAssistantTurn(ctx, sessionID)
+          const { toolCalls, text: replyText, observation } = await lastAssistantTurn(ctx, sessionID)
           const reply = normalize(replyText)
           const repeated = reply.length > 0 && state.lastDigest === digest(reply)
           const repeats = repeated ? (state.repeats ?? 0) + 1 : 0
           const stalled = toolCalls === 0 ? (state.stalled ?? 0) + 1 : 0
+          // The third no-progress shape: the agent used tools and said something new each
+          // turn, but read back the same unchanged result — polling. Neither guard above can
+          // see it, because the reply digest moves and the tool count is non-zero. It is
+          // counted separately and, on the first turn, only *reported* to the judge, so the
+          // agent is told to stop polling before anything is stopped for it.
+          const sameObservation =
+            observation.length > 0 && state.lastObservation === observation
+          const observing = sameObservation ? (state.observing ?? 0) + 1 : 0
           const looping: GoalState = {
             ...progressed,
             lastDigest: reply.length ? digest(reply) : state.lastDigest,
+            lastObservation: observation.length ? observation : state.lastObservation,
             repeats,
             stalled,
+            observing,
           }
 
           if (repeats >= 2) {
             await write(sessionID, { ...looping, status: "paused" })
             return terminal(
               sessionID,
-              `⏸ Goal paused — looping: the agent has now repeated the same reply ${repeats} turns running without acting. Judge said: ${verdict.reason}\nThe goal is not reachable in this session. Re-scope it with /goal <new text>.`,
+              `⏸ Goal paused — looping: the agent has now repeated the same reply ${repeats} turns running without acting. Judge said: ${verdict.reason}\nThis loop is not making progress. Either resume with /goal resume, or re-scope it with /goal <new text>.`,
+            )
+          }
+          if (observing >= 3) {
+            await write(sessionID, { ...looping, status: "paused" })
+            return terminal(
+              sessionID,
+              `⏸ Goal paused — polling: ${observing} turns ran tools and read back the same unchanged result, so the work is not moving.\nIf a command is still running, wait for its completion instead of re-reading it; otherwise do different work, then /goal resume. This says nothing about whether the goal is reachable.`,
             )
           }
           if (stalled >= (await settingsFor(sessionID)).stall) {

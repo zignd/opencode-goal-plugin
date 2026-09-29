@@ -57,6 +57,9 @@ export type GoalView = {
   maxTurns: number | null
   stalled: number
   repeats: number
+  /** Turns that re-read an unchanged result. Optional: added after v1 shipped, so it is
+   *  deliberately not in `required` and older views simply do not carry it. */
+  observing?: number
   /** The judge's most recent one-sentence reason, or "". */
   reason: string
   /** The goal's own proof condition, or "". */
@@ -74,6 +77,7 @@ const state = {
     maxTurns: { anyOf: [{ type: "number" }, { type: "null" }] },
     stalled: { type: "number" },
     repeats: { type: "number" },
+    observing: { type: "number" },
     reason: { type: "string" },
     verification: { type: "string" },
     updatedAt: { type: "number" },
