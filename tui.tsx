@@ -1,3 +1,4 @@
+import { appendFileSync } from "node:fs"
 import { Plugin } from "@opencode/plugin/tui"
 import { createEffect, createSignal, onCleanup, Show } from "solid-js"
 import type { Renderable } from "@opentui/core"
@@ -29,6 +30,14 @@ import {
  */
 
 const PANEL = "goal"
+
+/** TEMPORARY: the TUI's stdout is invisible to automated checks, so the dialog
+ *  traces to a file. Remove once the keys are confirmed working. */
+const trace = (...parts: unknown[]) => {
+  try {
+    appendFileSync("/tmp/goal-dialog-trace.log", parts.map(String).join(" ") + "\n")
+  } catch {}
+}
 
 const PLACEMENT_HELP: Record<Placement, string> = {
   panel: "full view, right side",
@@ -419,6 +428,7 @@ export default Plugin.define({
     }
 
     const openDisplayDialog = () => {
+      trace("openDisplayDialog called")
       setDialogDraft({ ...display })
       setDialogCursor(0)
       context.ui.dialog.set({ size: "medium", centered: true })
@@ -428,8 +438,14 @@ export default Plugin.define({
             flexDirection="column"
             focusable
             ref={(element: Renderable) => {
+              trace("ref fired; element =", element ? element.constructor.name : "null")
               setDialogFrame(element)
-              element?.focus?.()
+              try {
+                element?.focus?.()
+                trace("after focus(), focused =", String(element?.focused))
+              } catch (error) {
+                trace("focus() THREW", (error as Error).message)
+              }
             }}
           >
             <text fg={palette.base}>Where should the goal be shown?</text>
@@ -452,6 +468,7 @@ export default Plugin.define({
         // Fires on every close, including the host's own escape handling, so
         // this is what guarantees the layer is never left targeted.
         () => {
+          trace("dialog onClose")
           setDialogFrame(null)
           setDialogDraft(null)
         },
@@ -463,15 +480,34 @@ export default Plugin.define({
       context.ui.slot({
         append: "app",
         render: () => {
-          context.keymap.layer(() => ({
+          trace("app slot render fired (registering layer)")
+          context.keymap.layer(() => {
+            const target = dialogFrame()
+            trace("layer factory ran; target =", target ? target.constructor.name : "null")
+            return {
             target: () => dialogFrame(),
             commands: [
-              { id: "goal.display.up", bind: "up", run: () => moveDialogCursor(-1) },
-              { id: "goal.display.down", bind: "down", run: () => moveDialogCursor(1) },
+              {
+                id: "goal.display.up",
+                bind: "up",
+                run: () => {
+                  trace("KEY up")
+                  return moveDialogCursor(-1)
+                },
+              },
+              {
+                id: "goal.display.down",
+                bind: "down",
+                run: () => {
+                  trace("KEY down")
+                  return moveDialogCursor(1)
+                },
+              },
               {
                 id: "goal.display.toggle",
                 bind: "space",
                 run: () => {
+                  trace("KEY space; draft set?", String(dialogDraft() !== null))
                   if (!dialogDraft()) return undefined
                   setDialogDraft((current) => toggleDraft(current!, PLACEMENTS[dialogCursor()]))
                   return false
@@ -481,6 +517,7 @@ export default Plugin.define({
                 id: "goal.display.apply",
                 bind: "enter",
                 run: () => {
+                  trace("KEY enter")
                   if (!dialogDraft()) return undefined
                   void commitDialog()
                   return false
@@ -490,13 +527,15 @@ export default Plugin.define({
                 id: "goal.display.cancel",
                 bind: "escape",
                 run: () => {
+                  trace("KEY escape (ours)")
                   if (!dialogDraft()) return undefined
                   closeDialog()
                   return false
                 },
               },
             ],
-          }))
+            }
+          })
           return null
         },
       }),
