@@ -293,7 +293,9 @@ OpenCode's V2 plugin API; no code was copied from either project.
 | `index.ts` | OpenCode server | The loop itself, plus the RPC the TUI reads. |
 | `rpc.ts` | shared | The contract between the two halves. |
 | `tui.ts` | TUI | Discovered entrypoint; re-exports the panel. |
-| `tui.tsx` | TUI | The panel and the toasts. JSX needs the `.tsx` extension. |
+| `tui.tsx` | TUI | The panel, the summary lines, the toasts and dialogs. JSX needs the `.tsx` extension. |
+| `display.ts` | TUI | Which placements are on, as pure functions. |
+| `display.test.ts` | TUI | Checks for the above. Plain node, no test framework. |
 
 ## Development
 
@@ -302,6 +304,7 @@ git clone https://github.com/zignd/opencode-goal-plugin.git
 cd opencode-goal-plugin
 npm install
 npx tsc -p tsconfig.json
+node display.test.ts
 ```
 
 Bumping support for a new OpenCode release means bumping `@opencode/plugin` and re-running the

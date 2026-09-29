@@ -21,6 +21,8 @@
     "index.ts",
     "rpc.ts",
     "tui.ts",
-    "tui.tsx"
+    "tui.tsx",
+    "display.ts",
+    "display.test.ts"
   ]
 }

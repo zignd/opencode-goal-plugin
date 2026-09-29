@@ -1,6 +1,16 @@
 import { Plugin } from "@opencode/plugin/tui"
 import { createEffect, createSignal, onCleanup, Show } from "solid-js"
 import { Goal, HELP_TEXT as HELP, type GoalView } from "./rpc.js"
+import {
+  applyChoice,
+  applySet,
+  describe,
+  isPlacement,
+  PLACEMENTS,
+  seedDisplay,
+  type Choice,
+  type Placement,
+} from "./display.js"
 
 /**
  * The TUI half of the goal plugin.
@@ -17,29 +27,6 @@ import { Goal, HELP_TEXT as HELP, type GoalView } from "./rpc.js"
  */
 
 const PANEL = "goal"
-
-/** Where the goal can appear. The panel gets the full view, the rest a summary. */
-const PLACEMENTS = ["panel", "footer", "composer", "sidebar"] as const
-type Placement = (typeof PLACEMENTS)[number]
-
-type Display = Record<Placement, boolean>
-
-/**
- * Options set the *initial* placement; after the first run the durable store
- * wins, so a choice made in the TUI survives restarts and is not silently
- * reverted by editing opencode.json.
- */
-const seedDisplay = (options: Record<string, unknown>): Display => {
-  const given = (options.display ?? {}) as Partial<Record<Placement, unknown>>
-  const pick = (key: Placement, fallback: boolean) =>
-    typeof given[key] === "boolean" ? (given[key] as boolean) : fallback
-  return {
-    panel: pick("panel", true),
-    footer: pick("footer", true),
-    composer: pick("composer", false),
-    sidebar: pick("sidebar", false),
-  }
-}
 
 type Changed = { sessionID: string; state: GoalView | null }
 type GetResult = { sessionID: string; state: GoalView | null }
@@ -398,13 +385,15 @@ export default Plugin.define({
       rpc.events.on("display", async (event) => {
         if (!isLocal(event.location?.directory)) return
         const { placement, enabled } = event.data as { placement?: string; enabled?: boolean }
-        const known = (key: string) => (PLACEMENTS as readonly string[]).includes(key)
+        // Every branch delegates to display.ts, which has its own tests. The
+        // picker logic was previously inline and could only be checked by a
+        // person clicking through the dialog.
 
         // No placement: a settings query deserves a list you can act on, not a
         // toast that vanishes before it is read.
         if (!placement) {
           try {
-            const choice = await context.ui.dialog.select<"__off" | Placement>({
+            const choice = await context.ui.dialog.select<Choice>({
               title: "Where should the goal be shown?",
               options: [
                 ...PLACEMENTS.map((key) => ({
@@ -414,25 +403,19 @@ export default Plugin.define({
                 })),
                 {
                   title: "hide everywhere",
-                  value: "__off" as const,
+                  value: "__off" as Choice,
                   description: "only the transcript shows the goal",
                 },
               ],
             })
             if (choice === undefined) return
-            const next =
-              choice === "__off"
-                ? Object.fromEntries(PLACEMENTS.map((key) => [key, false]))
-                : { [choice]: !display[choice] }
+            const next = applyChoice(display, choice)
             await setDisplay((draft) => {
-              for (const key of PLACEMENTS) draft[key] = next[key] ?? false
+              for (const key of PLACEMENTS) draft[key] = next[key]
             })
             context.ui.toast.show({
               title: "Goal display",
-              message:
-                choice === "__off"
-                  ? "hidden everywhere"
-                  : `${choice} ${next[choice] ? "on" : "off"}`,
+              message: choice === "__off" ? "hidden everywhere" : describe(next),
               duration: 3000,
             })
             return
@@ -441,13 +424,13 @@ export default Plugin.define({
           }
         }
 
-        if (placement && known(placement)) {
-          const next = enabled ?? !display[placement as Placement]
+        if (placement && isPlacement(placement)) {
+          const next = applySet(display, placement, enabled ?? !display[placement])
           await setDisplay((draft) => {
-            draft[placement as Placement] = next
+            draft[placement] = next[placement]
           })
           context.ui.toast.show({
-            title: next ? "Goal shown" : "Goal hidden",
+            title: next[placement] ? "Goal shown" : "Goal hidden",
             message: placement,
             duration: 3000,
           })
