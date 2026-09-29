@@ -1,6 +1,6 @@
 {
   "name": "opencode-goal-plugin",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Persistent /goal command for OpenCode 2: set a standing goal and keep working until it is done, blocked, stalled, or out of turns",
   "type": "module",
   "main": "./index.ts",
@@ -14,6 +14,9 @@
     "rpc.ts",
     "tui.ts",
     "tui.tsx",
+    "display.ts",
+    "budget.ts",
+    "settings.ts",
     "tsconfig.json"
   ],
   "keywords": [
@@ -24,7 +27,7 @@
     "autonomous"
   ],
   "license": "MIT",
-  "author": "Igor Hipólito Vieira",
+  "author": "Igor Hip\u00f3lito Vieira",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/zignd/opencode-goal-plugin.git"
@@ -33,6 +36,16 @@
     "url": "https://github.com/zignd/opencode-goal-plugin/issues"
   },
   "homepage": "https://github.com/zignd/opencode-goal-plugin#readme",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "test": "node --test",
+    "test:watch": "node --test --watch",
+    "test:coverage": "node --test --experimental-test-coverage",
+    "typecheck": "tsc -p tsconfig.json",
+    "check": "npm run typecheck && npm test"
+  },
   "dependencies": {
     "@opencode/plugin": "^2.0.18"
   },
@@ -45,7 +58,7 @@
     "@opentui/core": "^0.5.12",
     "@opentui/solid": "^0.5.12",
     "@types/node": "^24.0.0",
-    "solid-js": "^1.9.15",
+    "solid-js": "1.9.12",
     "typescript": "^5.9.3"
   }
 }

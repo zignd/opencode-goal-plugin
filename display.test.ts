@@ -1,150 +1,272 @@
 /**
- * Checks for the display picker. Run with: node display.test.ts
+ * The display picker.
  *
- * The picker had a bug that only a person clicking through the dialog could
- * find, which is exactly the class of bug these exist to catch.
+ * The picker had a bug only a person clicking through the dialog could find:
+ * toggling one placement silently switched the others off. That is the class
+ * of bug these exist to catch, and the reason the selection logic lives in
+ * display.ts as pure functions rather than inline in tui.tsx.
  */
+import { describe, test } from "node:test"
+import assert from "node:assert/strict"
 import {
   applyAll,
   applyParsed,
   applySet,
   DEFAULTS,
-  describe,
+  describe as summarise,
   isPlacement,
   parseDisplayArgument,
   seedDisplay,
   type Display,
 } from "./display.ts"
 
-let failures = 0
+const BOTH: Display = { panel: true, footer: true, composer: false, sidebar: false }
 
-function check(name: string, actual: unknown, expected: unknown) {
-  const a = JSON.stringify(actual)
-  const e = JSON.stringify(expected)
-  if (a === e) {
-    console.log(`  ok   ${name}`)
-  } else {
-    failures++
-    console.log(`  FAIL ${name}\n         expected ${e}\n         actual   ${a}`)
+describe("seedDisplay", () => {
+  test("uses the defaults with no options", () => {
+    assert.deepEqual(seedDisplay(undefined), DEFAULTS)
+  })
+
+  test("honours a single override", () => {
+    assert.deepEqual(seedDisplay({ panel: false }), {
+      panel: false,
+      footer: true,
+      composer: false,
+      sidebar: false,
+    })
+  })
+
+  test("ignores unknown keys", () => {
+    assert.deepEqual(seedDisplay({ nope: true, sidebar: true }), {
+      panel: true,
+      footer: true,
+      composer: false,
+      sidebar: true,
+    })
+  })
+
+  test("ignores non-boolean values", () => {
+    assert.deepEqual(seedDisplay({ panel: "yes" }), DEFAULTS)
+  })
+})
+
+describe("the reported bug: toggling one placement", () => {
+  // The dialog has since been replaced by the native picker, so this is covered
+  // through applyParsed, which is what both the picker and the command line use.
+  test("panel leaves footer alone", () => {
+    assert.deepEqual(applyParsed(BOTH, parseDisplayArgument("panel")), {
+      panel: false,
+      footer: true,
+      composer: false,
+      sidebar: false,
+    })
+  })
+
+  test("footer leaves panel alone", () => {
+    assert.deepEqual(applyParsed(BOTH, parseDisplayArgument("footer")), {
+      panel: true,
+      footer: false,
+      composer: false,
+      sidebar: false,
+    })
+  })
+
+  test("turning an off placement on affects only it", () => {
+    assert.deepEqual(applyParsed(BOTH, parseDisplayArgument("composer")), {
+      panel: true,
+      footer: true,
+      composer: true,
+      sidebar: false,
+    })
+  })
+})
+
+describe("applyAll", () => {
+  test("clears every placement", () => {
+    assert.deepEqual(applyAll(false), {
+      panel: false,
+      footer: false,
+      composer: false,
+      sidebar: false,
+    })
+  })
+
+  test("sets every placement", () => {
+    assert.deepEqual(applyAll(true), {
+      panel: true,
+      footer: true,
+      composer: true,
+      sidebar: true,
+    })
+  })
+})
+
+describe("applySet", () => {
+  test("turns one on and keeps the rest", () => {
+    assert.deepEqual(applySet(BOTH, "sidebar", true), {
+      panel: true,
+      footer: true,
+      composer: false,
+      sidebar: true,
+    })
+  })
+
+  test("turns one off and keeps the rest", () => {
+    assert.deepEqual(applySet(BOTH, "panel", false), {
+      panel: false,
+      footer: true,
+      composer: false,
+      sidebar: false,
+    })
+  })
+
+  test("does not mutate its input", () => {
+    const original: Display = { ...BOTH }
+    applySet(original, "panel", false)
+    applyAll(true)
+    assert.deepEqual(original, BOTH)
+  })
+})
+
+describe("parseDisplayArgument", () => {
+  test("reads a single placement", () => {
+    assert.deepEqual(parseDisplayArgument("panel"), { placements: ["panel"], unknown: [] })
+  })
+
+  test("reads a comma separated list", () => {
+    assert.deepEqual(parseDisplayArgument("panel,composer,sidebar"), {
+      placements: ["panel", "composer", "sidebar"],
+      unknown: [],
+    })
+  })
+
+  test("reads a space separated list", () => {
+    assert.deepEqual(parseDisplayArgument("panel composer"), {
+      placements: ["panel", "composer"],
+      unknown: [],
+    })
+  })
+
+  test("accepts mixed separators", () => {
+    assert.deepEqual(parseDisplayArgument("panel, composer sidebar"), {
+      placements: ["panel", "composer", "sidebar"],
+      unknown: [],
+    })
+  })
+
+  test("collapses duplicates", () => {
+    assert.deepEqual(parseDisplayArgument("panel,panel"), { placements: ["panel"], unknown: [] })
+  })
+
+  test("reads an explicit off", () => {
+    assert.deepEqual(parseDisplayArgument("footer off"), {
+      placements: ["footer"],
+      enabled: false,
+      unknown: [],
+    })
+  })
+
+  test("reads an explicit on", () => {
+    assert.deepEqual(parseDisplayArgument("footer on"), {
+      placements: ["footer"],
+      enabled: true,
+      unknown: [],
+    })
+  })
+
+  for (const [word, enabled] of [
+    ["yes", true],
+    ["no", false],
+  ]) {
+    test(`reads "${word}" as ${enabled ? "on" : "off"}`, () => {
+      assert.deepEqual(parseDisplayArgument(`footer ${word}`), {
+        placements: ["footer"],
+        enabled,
+        unknown: [],
+      })
+    })
   }
-}
 
-console.log("seedDisplay")
-check("defaults with no options", seedDisplay(undefined), DEFAULTS)
-check("panel only off", seedDisplay({ panel: false }), { panel: false, footer: true, composer: false, sidebar: false })
-check("unknown keys ignored", seedDisplay({ nope: true, sidebar: true }), { panel: true, footer: true, composer: false, sidebar: true })
-check("non-boolean ignored", seedDisplay({ panel: "yes" }), DEFAULTS)
+  test("accepts off before the list", () => {
+    assert.deepEqual(parseDisplayArgument("off panel,sidebar"), {
+      placements: ["panel", "sidebar"],
+      enabled: false,
+      unknown: [],
+    })
+  })
 
-// The original reported bug: toggling one placement silently switched the rest
-// off. The dialog replaced the single-select picker, so this is now covered via
-// applyParsed, which is what the command line and the dialog both go through.
-const both: Display = { panel: true, footer: true, composer: false, sidebar: false }
-check("toggling panel leaves footer alone", applyParsed(both, parseDisplayArgument("panel")), {
-  panel: false,
-  footer: true,
-  composer: false,
-  sidebar: false,
-})
-check("toggling footer leaves panel alone", applyParsed(both, parseDisplayArgument("footer")), {
-  panel: true,
-  footer: false,
-  composer: false,
-  sidebar: false,
-})
-check("toggling an off placement turns only it on", applyParsed(both, parseDisplayArgument("composer")), {
-  panel: true,
-  footer: true,
-  composer: true,
-  sidebar: false,
+  test("reads an empty argument as nothing named", () => {
+    assert.deepEqual(parseDisplayArgument(""), { placements: [], unknown: [] })
+  })
+
+  test("reports an unknown name", () => {
+    assert.deepEqual(parseDisplayArgument("nope"), { placements: [], unknown: ["nope"] })
+  })
+
+  test("reports an unknown name alongside a known one", () => {
+    assert.deepEqual(parseDisplayArgument("panel,nope"), {
+      placements: ["panel"],
+      unknown: ["nope"],
+    })
+  })
 })
 
-console.log("applyAll")
-check("all off", applyAll(false), { panel: false, footer: false, composer: false, sidebar: false })
-check("all on", applyAll(true), { panel: true, footer: true, composer: true, sidebar: true })
+describe("applyParsed", () => {
+  test("toggles each named placement when no on/off is given", () => {
+    assert.deepEqual(applyParsed(BOTH, parseDisplayArgument("panel,composer")), {
+      panel: false,
+      footer: true,
+      composer: true,
+      sidebar: false,
+    })
+  })
 
-console.log("applySet")
-check("sets one, keeps the rest", applySet(both, "sidebar", true), {
-  panel: true,
-  footer: true,
-  composer: false,
-  sidebar: true,
-})
-check("turns one off, keeps the rest", applySet(both, "panel", false), {
-  panel: false,
-  footer: true,
-  composer: false,
-  sidebar: false,
+  test("an explicit off clears only the named placements", () => {
+    assert.deepEqual(applyParsed(BOTH, parseDisplayArgument("panel,composer off")), {
+      panel: false,
+      footer: true,
+      composer: false,
+      sidebar: false,
+    })
+  })
+
+  test("an explicit on sets only the named placements", () => {
+    assert.deepEqual(applyParsed(BOTH, parseDisplayArgument("sidebar on")), {
+      panel: true,
+      footer: true,
+      composer: false,
+      sidebar: true,
+    })
+  })
+
+  test("can clear everything in one go", () => {
+    assert.deepEqual(
+      applyParsed(BOTH, parseDisplayArgument("panel,footer,composer,sidebar off")),
+      { panel: false, footer: false, composer: false, sidebar: false },
+    )
+  })
+
+  test("names nothing, changes nothing", () => {
+    assert.deepEqual(applyParsed(BOTH, parseDisplayArgument("")), BOTH)
+  })
 })
 
-console.log("does not mutate its input")
-const original: Display = { ...both }
-applySet(original, "panel", false)
-check("input untouched", original, both)
+describe("isPlacement", () => {
+  test("accepts a known placement", () => {
+    assert.equal(isPlacement("panel"), true)
+  })
 
-console.log("parseDisplayArgument")
-check("single placement", parseDisplayArgument("panel"), { placements: ["panel"], unknown: [] })
-check("comma list", parseDisplayArgument("panel,composer,sidebar"), {
-  placements: ["panel", "composer", "sidebar"],
-  unknown: [],
+  test("rejects an unknown one", () => {
+    assert.equal(isPlacement("nope"), false)
+  })
 })
-check("space list", parseDisplayArgument("panel composer"), {
-  placements: ["panel", "composer"],
-  unknown: [],
-})
-check("mixed separators", parseDisplayArgument("panel, composer sidebar"), {
-  placements: ["panel", "composer", "sidebar"],
-  unknown: [],
-})
-check("explicit off", parseDisplayArgument("footer off"), { placements: ["footer"], enabled: false, unknown: [] })
-check("explicit on", parseDisplayArgument("footer on"), { placements: ["footer"], enabled: true, unknown: [] })
-check("truthy synonyms", parseDisplayArgument("footer yes"), { placements: ["footer"], enabled: true, unknown: [] })
-check("falsy synonyms", parseDisplayArgument("footer no"), { placements: ["footer"], enabled: false, unknown: [] })
-check("off before list", parseDisplayArgument("off panel,sidebar"), {
-  placements: ["panel", "sidebar"],
-  enabled: false,
-  unknown: [],
-})
-check("duplicates collapse", parseDisplayArgument("panel,panel"), { placements: ["panel"], unknown: [] })
-check("empty argument", parseDisplayArgument(""), { placements: [], unknown: [] })
-check("unknown reported", parseDisplayArgument("nope"), { placements: [], unknown: ["nope"] })
-check("known and unknown", parseDisplayArgument("panel,nope"), { placements: ["panel"], unknown: ["nope"] })
 
-console.log("applyParsed")
-const start: Display = { panel: true, footer: true, composer: false, sidebar: false }
-check(
-  "no on/off toggles each named",
-  applyParsed(start, parseDisplayArgument("panel,composer")),
-  { panel: false, footer: true, composer: true, sidebar: false },
-)
-check("explicit off sets only the named", applyParsed(start, parseDisplayArgument("panel,composer off")), {
-  panel: false,
-  footer: true,
-  composer: false,
-  sidebar: false,
-})
-check("explicit on sets only the named", applyParsed(start, parseDisplayArgument("sidebar on")), {
-  panel: true,
-  footer: true,
-  composer: false,
-  sidebar: true,
-})
-check("everything off in one go", applyParsed(start, parseDisplayArgument("panel,footer,composer,sidebar off")), {
-  panel: false,
-  footer: false,
-  composer: false,
-  sidebar: false,
-})
-check("no placements changes nothing", applyParsed(start, parseDisplayArgument("")), start)
+describe("summarise", () => {
+  test("lists the placements that are on", () => {
+    assert.equal(summarise(BOTH), "panel, footer")
+  })
 
-console.log("misc")
-check("isPlacement accepts known", isPlacement("panel"), true)
-check("isPlacement rejects unknown", isPlacement("nope"), false)
-check("describe lists on", describe(both), "panel, footer")
-check(
-  "describe when none",
-  describe(applyParsed(both, parseDisplayArgument("panel,footer,composer,sidebar off"))),
-  "hidden everywhere",
-)
-
-console.log(failures === 0 ? "\nall passed" : `\n${failures} FAILED`)
-process.exit(failures === 0 ? 0 : 1)
+  test("says so when none are", () => {
+    assert.equal(summarise(applyAll(false)), "hidden everywhere")
+  })
+})

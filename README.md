@@ -427,11 +427,31 @@ OpenCode's V2 plugin API; no code was copied from either project.
 git clone https://github.com/zignd/opencode-goal-plugin.git
 cd opencode-goal-plugin
 npm install
-npx tsc -p tsconfig.json
-node display.test.ts
-node budget.test.ts
-node settings.test.ts
+
+npm test              # the whole suite
+npm run check         # typecheck, then the suite — what CI runs
+npm run typecheck     # tsc alone
+npm run test:watch    # re-run on change
+npm run test:coverage # line, branch and function coverage
 ```
+
+The suite runs on Node's built-in test runner, so there is no test dependency to install.
+`node --test` discovers `*.test.ts` and strips the types, which is why the checks import
+`./settings.ts` while the plugin source imports `./settings.js` — the plugin needs `.js`
+specifiers for OpenCode's own loader. Where a module is imported by both, the import is
+`import type`, which is erased and so has no runtime cost.
+
+Current state: 140 checks over three modules, at 100% line, branch and function coverage.
+
+| Module | What it covers |
+| --- | --- |
+| `budget.ts` | Turn-budget parsing, the exhaustion gate, formatting, the `maxTurns` option |
+| `display.ts` | Which placements are shown, `/goal display` argument parsing |
+| `settings.ts` | The other three settings, override resolution, the `/goal settings` summary |
+
+`index.ts` and `tui.tsx` are not unit tested: they are mostly wiring, and the parts that
+historically broke were extracted into the three pure modules precisely so they could be.
+`npm run check` typechecks both.
 
 Bumping support for a new OpenCode release means bumping `@opencode/plugin` and re-running the
 typecheck. `tsconfig.json` carries `jsxImportSource: "@opentui/solid"`, which is what makes the
