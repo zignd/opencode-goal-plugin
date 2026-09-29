@@ -197,42 +197,11 @@ terminal open in one project will not affect a headless run in another.
 
 ### Choosing where the goal is shown
 
-`/goal display` with no argument opens a checkbox dialog so several placements can be changed
-at once:
+`/goal display` opens a picker listing the four placements with their current state. Picking
+one toggles **only that one**; *hide everywhere* clears them all.
 
-```text
-  Where should the goal be shown?
-    up/down move · space toggles · enter applies · esc cancels
-
-  › [x] panel — full view, right side
-    [x] footer — one line under the composer
-    [ ] composer — one line above the composer
-    [ ] sidebar — one line at the bottom of the sidebar
-```
-
-Toggles land in a draft, so nothing is saved until <kbd>enter</kbd>, and <kbd>esc</kbd> discards
-them. TUI-only, and it says so elsewhere.
-
-There is no checkbox primitive in OpenTUI, so this is a plain `box` with the checkmarks drawn
-as text, plus a keymap layer gated on the dialog being open. Three things are easy to get
-wrong here, and every one of them produces a dialog that renders perfectly and accepts no keys
-at all:
-
-- `context.keymap.layer` **must be called from a component** — the same reason calling it from
-  `setup` throws `Keymap.Provider is missing`. The layer is registered once in the `app` slot
-  rather than per dialog, and a `try`/`catch` around it will hide the throw.
-- Gate with **`enabled`**, not `target`. `target` limits a layer to a renderable that currently
-  has focus; the dialog's box never gains focus, so a `target`ed layer stays permanently inert
-  while looking perfectly correct in the source.
-- Anything read inside the layer factory or a handler must be a **signal**. Solid only tracks
-  signals, so a plain variable is read once and never again.
-
-If a dialog ever renders but ignores keys, trace whether the handlers run at all. "Handler never
-ran" means the layer is not receiving keys; "handler ran and nothing moved" means the state is
-wrong.
-
-For scripting, name placements on the command line instead — comma or space separated, with an
-optional trailing `on`/`off`:
+The picker closes on the first pick, so name several at once on the command line for anything
+non-trivial. Comma or space separated, with an optional trailing `on`/`off`:
 
 ```text
 /goal display panel,composer          toggle each of those three
@@ -243,11 +212,17 @@ optional trailing `on`/`off`:
 With an explicit `on`/`off` the named placements are set and the rest untouched; without one,
 each named placement toggles.
 
-The selection logic lives in `display.ts` as pure functions with checks in
-`display.test.ts`, because it could only otherwise be verified by clicking through the dialog —
-and the first version of it silently switched every other placement off when you picked one.
-The dialog's cursor movement and draft toggling are covered there too; only the layout is
-unverified, since that needs eyes.
+> **This is a native picker on purpose.** A custom checkbox dialog was built — focusable box,
+> hand-drawn checkmarks, a keymap layer — and abandoned. In this host a plugin keymap layer does
+> not receive keys while a plugin dialog is open, so it rendered perfectly and ignored every
+> keypress. It was traced across three variants (registered from `setup`, then from a component
+> gated on `target`, then gated on `enabled`); in all three the handlers never ran once, while
+> the host's own dialogs worked throughout. The host's dialogs manage their own input, so they
+> are the ones to use. A multi-select dialog would need host support for plugin input in dialogs.
+
+The selection logic lives in `display.ts` as pure functions with checks in `display.test.ts`,
+because it could only otherwise be verified by clicking through the dialog — and the first
+version of it silently switched every other placement off when you picked one.
 
 > Editing `index.ts`, `rpc.ts` or `display.ts` hot-reloads. Editing `tui.tsx` does **not** —
 > restart the TUI to pick it up, because the discovered `tui.ts` entrypoint is what gets

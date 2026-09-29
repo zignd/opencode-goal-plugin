@@ -94,13 +94,8 @@ export function describe(current: Display): string {
   return on.length ? on.join(", ") : "hidden everywhere"
 }
 
-/** Cursor movement for the multi-select dialog, wrapping at both ends. */
-export function moveCursor(current: number, delta: number, length: number): number {
-  if (length === 0) return 0
-  return (((current + delta) % length) + length) % length
+/** Set every placement at once — the "hide everywhere" case in the picker. */
+export function applyAll(enabled: boolean): Display {
+  return { panel: enabled, footer: enabled, composer: enabled, sidebar: enabled }
 }
 
-/** Toggle one placement in a draft, leaving the rest of the draft alone. */
-export function toggleDraft(draft: Display, placement: Placement): Display {
-  return { ...draft, [placement]: !draft[placement] }
-}

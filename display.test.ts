@@ -5,15 +5,14 @@
  * find, which is exactly the class of bug these exist to catch.
  */
 import {
+  applyAll,
   applyParsed,
   applySet,
   DEFAULTS,
   describe,
   isPlacement,
-  moveCursor,
   parseDisplayArgument,
   seedDisplay,
-  toggleDraft,
   type Display,
 } from "./display.ts"
 
@@ -58,6 +57,10 @@ check("toggling an off placement turns only it on", applyParsed(both, parseDispl
   composer: true,
   sidebar: false,
 })
+
+console.log("applyAll")
+check("all off", applyAll(false), { panel: false, footer: false, composer: false, sidebar: false })
+check("all on", applyAll(true), { panel: true, footer: true, composer: true, sidebar: true })
 
 console.log("applySet")
 check("sets one, keeps the rest", applySet(both, "sidebar", true), {
@@ -132,30 +135,6 @@ check("everything off in one go", applyParsed(start, parseDisplayArgument("panel
   sidebar: false,
 })
 check("no placements changes nothing", applyParsed(start, parseDisplayArgument("")), start)
-
-console.log("moveCursor — the dialog's arrow keys")
-check("down from the top", moveCursor(0, 1, 4), 1)
-check("down wraps past the end", moveCursor(3, 1, 4), 0)
-check("up from the top wraps to the end", moveCursor(0, -1, 4), 3)
-check("up from the middle", moveCursor(2, -1, 4), 1)
-check("empty list is safe", moveCursor(0, 1, 0), 0)
-
-console.log("toggleDraft — space in the dialog")
-const draftStart: Display = { panel: true, footer: true, composer: false, sidebar: false }
-check("toggles the named one on", toggleDraft(draftStart, "composer"), {
-  panel: true,
-  footer: true,
-  composer: true,
-  sidebar: false,
-})
-check("toggles the named one off", toggleDraft(draftStart, "footer"), {
-  panel: true,
-  footer: false,
-  composer: false,
-  sidebar: false,
-})
-check("does not touch the others", Object.keys(toggleDraft(draftStart, "sidebar")).length, 4)
-check("does not mutate the draft", draftStart, { panel: true, footer: true, composer: false, sidebar: false })
 
 console.log("misc")
 check("isPlacement accepts known", isPlacement("panel"), true)

@@ -1,15 +1,14 @@
-import { appendFileSync } from "node:fs"
 import { Plugin } from "@opencode/plugin/tui"
 import { createEffect, createSignal, onCleanup, Show } from "solid-js"
 import { Goal, HELP_TEXT as HELP, type GoalView } from "./rpc.js"
 import {
+  applyAll,
   applyParsed,
+  applySet,
   describe,
   isPlacement,
-  moveCursor,
   PLACEMENTS,
   seedDisplay,
-  toggleDraft,
   type Display,
   type Placement,
 } from "./display.js"
@@ -30,13 +29,6 @@ import {
 
 const PANEL = "goal"
 
-/** TEMPORARY: the TUI's stdout is invisible to automated checks, so the dialog
- *  traces to a file. Remove once the keys are confirmed working. */
-const trace = (...parts: unknown[]) => {
-  try {
-    appendFileSync("/tmp/goal-dialog-trace.log", parts.map(String).join(" ") + "\n")
-  } catch {}
-}
 
 const PLACEMENT_HELP: Record<Placement, string> = {
   panel: "full view, right side",
@@ -387,158 +379,47 @@ export default Plugin.define({
     )
 
     /**
-     * Dialog state lives in signals, not locals, for two reasons that both bit:
+     * Where the goal is shown.
      *
-     * 1. The keymap layer has to be registered from a component. Calling
-     *    keymap.layer from an event handler throws "Keymap.Provider is missing"
-     *    - the same failure as calling it from setup - and that throw was being
-     *    swallowed by a try/catch, leaving an open dialog with no input at all.
-     * 2. The layer's `target` must read a signal. Solid only tracks signals, so
-     *    a plain `let` was read once while still null and the layer stayed
-     *    permanently inert.
+     * This uses the host's own select dialog rather than a custom one. A custom
+     * checkbox dialog was built and abandoned: a plugin keymap layer does not
+     * receive keys while a plugin dialog is open in this host, so it rendered
+     * perfectly and ignored every key. Three variants were traced and all dead
+     * for that reason — registered from a component and gated on `enabled` was
+     * the last, and its handlers never ran once.
      *
-     * So: one layer, registered once in the app slot, retargeted by a signal.
+     * The host's own dialogs manage their input, so they are the only ones that
+     * work. The picker closes on the first pick, which is why several placements
+     * can also be named on the command line.
      */
-    const [dialogDraft, setDialogDraft] = createSignal<Display | null>(null)
-    const [dialogCursor, setDialogCursor] = createSignal(0)
-
-    const closeDialog = () => {
-      setDialogDraft(null)
-      setDialogCursor(0)
-      context.ui.dialog.clear()
-    }
-
-    const commitDialog = async () => {
-      const next = dialogDraft()
-      closeDialog()
-      if (!next) return
-      await setDisplay((store) => {
-        for (const key of PLACEMENTS) store[key] = next[key]
+    const openDisplayPicker = async () => {
+      const choice = await context.ui.dialog.select<Placement | "__off">({
+        title: "Where should the goal be shown?",
+        options: [
+          ...PLACEMENTS.map((key) => ({
+            title: `${display[key] ? "on " : "off"}  ${key}`,
+            value: key,
+            description: PLACEMENT_HELP[key],
+          })),
+          {
+            title: "hide everywhere",
+            value: "__off" as const,
+            description: "only the transcript shows the goal",
+          },
+        ],
       })
-      context.ui.toast.show({ title: "Goal display", message: describe(next), duration: 3000 })
+      if (choice === undefined) return
+      const next =
+        choice === "__off" ? applyAll(false) : applySet(display, choice, !display[choice])
+      await setDisplay((draft) => {
+        for (const key of PLACEMENTS) draft[key] = next[key]
+      })
+      context.ui.toast.show({
+        title: "Goal display",
+        message: describe(next),
+        duration: 3000,
+      })
     }
-
-    const moveDialogCursor = (delta: number) => {
-      if (!dialogDraft()) return undefined
-      setDialogCursor((index) => moveCursor(index, delta, PLACEMENTS.length))
-      return false
-    }
-
-    const openDisplayDialog = () => {
-      trace("openDisplayDialog called")
-      setDialogDraft({ ...display })
-      setDialogCursor(0)
-      context.ui.dialog.set({ size: "medium", centered: true })
-      context.ui.dialog.show(
-        () => (
-          <box flexDirection="column">
-            {/* focusable and focus() removed: tracing showed focus() returns
-                without the renderable ever reporting focused, so asking for
-                focus was a no-op that only obscured why keys never arrived. The
-                keymap layer is gated on dialogDraft() instead. */}
-            <text fg={palette.base}>Where should the goal be shown?</text>
-            <text fg={palette.muted}>  up/down move · space toggles · enter applies · esc cancels</text>
-            <text> </text>
-            <Show when={dialogDraft()}>
-              {(draft) => (
-                <>
-                  {PLACEMENTS.map((key, index) => (
-                    <text fg={index === dialogCursor() ? palette.base : palette.muted}>
-                      {index === dialogCursor() ? "\u203a " : "  "}
-                      {draft()[key] ? "[x]" : "[ ]"} {key} \u2014 {PLACEMENT_HELP[key]}
-                    </text>
-                  ))}
-                </>
-              )}
-            </Show>
-          </box>
-        ),
-        // Fires on every close, including the host's own escape handling, so
-        // this is what guarantees the layer is never left targeted.
-        () => {
-          trace("dialog onClose")
-          setDialogDraft(null)
-        },
-      )
-    }
-
-    // Registered once from a component - keymap.layer throws
-    // "Keymap.Provider is missing" anywhere else - and gated on whether the
-    // dialog is open rather than on which renderable has focus.
-    guard("display dialog keymap", () =>
-      context.ui.slot({
-        append: "app",
-        render: () => {
-          trace("app slot render fired (registering layer)")
-          context.keymap.layer(() => {
-            const open = dialogDraft() !== null
-            trace("layer factory ran; dialog open =", String(open))
-            return {
-              // NOT `target`. That limits the layer to a renderable that has
-              // focus, and tracing showed the dialog's box never gains focus
-              // (focus() returns without setting it), which left the layer
-              // permanently inert - registered, correctly targeted, and never
-              // receiving a key. `enabled` gates on state instead, and the
-              // dialog being modal is what makes stealing keys safe.
-              enabled: open,
-            commands: [
-              {
-                id: "goal.display.up",
-                bind: "up",
-                run: () => {
-                  trace("KEY up")
-                  if (!dialogDraft()) return undefined
-                  setDialogCursor((index) => moveCursor(index, -1, PLACEMENTS.length))
-                  return undefined
-                },
-              },
-              {
-                id: "goal.display.down",
-                bind: "down",
-                run: () => {
-                  trace("KEY down")
-                  if (!dialogDraft()) return undefined
-                  setDialogCursor((index) => moveCursor(index, 1, PLACEMENTS.length))
-                  return undefined
-                },
-              },
-              {
-                id: "goal.display.toggle",
-                bind: "space",
-                run: () => {
-                  trace("KEY space; draft set?", String(dialogDraft() !== null))
-                  if (!dialogDraft()) return undefined
-                  setDialogDraft((current) => toggleDraft(current!, PLACEMENTS[dialogCursor()]))
-                  return false
-                },
-              },
-              {
-                id: "goal.display.apply",
-                bind: "enter",
-                run: () => {
-                  trace("KEY enter")
-                  if (!dialogDraft()) return undefined
-                  void commitDialog()
-                  return false
-                },
-              },
-              {
-                id: "goal.display.cancel",
-                bind: "escape",
-                run: () => {
-                  trace("KEY escape (ours)")
-                  if (!dialogDraft()) return undefined
-                  closeDialog()
-                  return false
-                },
-              },
-            ],
-            }
-          })
-          return null
-        },
-      }),
-    )
 
     guard("help request", () =>
       rpc.events.on("help", async (event) => {
@@ -572,7 +453,7 @@ export default Plugin.define({
         // an open dialog that accepted no keys at all and reported nothing, so
         // if this ever throws again let it surface.
         if (named.length === 0) {
-          openDisplayDialog()
+          await openDisplayPicker()
           return
         }
 
