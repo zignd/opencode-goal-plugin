@@ -1,14 +1,16 @@
 import { Plugin } from "@opencode/plugin/tui"
 import { createEffect, createSignal, onCleanup, Show } from "solid-js"
+import type { Renderable } from "@opentui/core"
 import { Goal, HELP_TEXT as HELP, type GoalView } from "./rpc.js"
 import {
-  applyChoice,
   applyParsed,
   describe,
   isPlacement,
+  moveCursor,
   PLACEMENTS,
   seedDisplay,
-  type Choice,
+  toggleDraft,
+  type Display,
   type Placement,
 } from "./display.js"
 
@@ -27,6 +29,13 @@ import {
  */
 
 const PANEL = "goal"
+
+const PLACEMENT_HELP: Record<Placement, string> = {
+  panel: "full view, right side",
+  footer: "one line under the composer",
+  composer: "one line above the composer",
+  sidebar: "one line at the bottom of the sidebar",
+}
 
 type Changed = { sessionID: string; state: GoalView | null }
 type GetResult = { sessionID: string; state: GoalView | null }
@@ -369,6 +378,111 @@ export default Plugin.define({
       }),
     )
 
+    /**
+     * The multi-select dialog, built from a focusable box plus a keymap layer
+     * scoped to it, rather than a checkbox primitive — there isn't one.
+     *
+     * `target` is the supported way to say "only while this renderable has
+     * focus", so the layer is inert outside the dialog without any bookkeeping.
+     * Toggles land in a local draft; nothing is persisted until enter, so a
+     * stray space cannot change a setting.
+     */
+    const openDisplayDialog = async () => {
+      const [draft, setDraft] = createSignal<Display>({ ...display })
+      const [cursor, setCursor] = createSignal(0)
+      let frame: Renderable | null = null
+
+      const commit = async () => {
+        const next = draft()
+        await setDisplay((store) => {
+          for (const key of PLACEMENTS) store[key] = next[key]
+        })
+        context.ui.dialog.clear()
+        context.ui.toast.show({ title: "Goal display", message: describe(next), duration: 3000 })
+      }
+
+      const Rows = () => (
+        <>
+          <text fg={palette.base}>Where should the goal be shown?</text>
+          <text fg={palette.muted}>  up/down move · space toggles · enter applies · esc cancels</text>
+          <text> </text>
+          {PLACEMENTS.map((key, index) => (
+            <text fg={index === cursor() ? palette.base : palette.muted}>
+              {index === cursor() ? "› " : "  "}
+              {draft()[key] ? "[x]" : "[ ]"} {key} — {PLACEMENT_HELP[key]}
+            </text>
+          ))}
+        </>
+      )
+
+      context.ui.dialog.set({ size: "medium", centered: true })
+      context.ui.dialog.show(
+        () => (
+          <box
+            flexDirection="column"
+            focusable
+            ref={(element: Renderable) => {
+              frame = element
+              element?.focus?.()
+            }}
+          >
+            <Rows />
+          </box>
+        ),
+        () => {
+          // Closed without committing, which is the point of the draft.
+        },
+      )
+
+      context.keymap.layer(() => ({
+        target: () => frame,
+        commands: [
+          {
+            id: "goal.display.up",
+            bind: "up",
+            run: () => {
+              setCursor((index) => moveCursor(index, -1, PLACEMENTS.length))
+              return false
+            },
+          },
+          {
+            id: "goal.display.down",
+            bind: "down",
+            run: () => {
+              setCursor((index) => moveCursor(index, 1, PLACEMENTS.length))
+              return false
+            },
+          },
+          {
+            id: "goal.display.toggle",
+            bind: "space",
+            run: () => {
+              setDraft((current) => toggleDraft(current, PLACEMENTS[cursor()]))
+              return false
+            },
+          },
+          {
+            id: "goal.display.apply",
+            bind: "enter",
+            run: () => {
+              frame = null
+              void commit()
+              return false
+            },
+          },
+          {
+            id: "goal.display.cancel",
+            bind: "escape",
+            run: () => {
+              frame = null
+              context.ui.dialog.clear()
+              return false
+            },
+          },
+        ],
+      }))
+    }
+
     guard("help request", () =>
       rpc.events.on("help", async (event) => {
         if (!isLocal(event.location?.directory)) return
@@ -394,36 +508,11 @@ export default Plugin.define({
         // picker logic was previously inline and could only be checked by a
         // person clicking through the dialog.
 
-        // No placement named: a settings query deserves a list you can act on,
-        // not a toast that vanishes before it is read. It closes on the first
-        // pick, so use `/goal display a,b` to change several at once.
+        // No placement named: open the multi-select dialog, so several can be
+        // changed in one go. The command line still works for scripting.
         if (named.length === 0) {
           try {
-            const choice = await context.ui.dialog.select<Choice>({
-              title: "Where should the goal be shown?",
-              options: [
-                ...PLACEMENTS.map((key) => ({
-                  title: `${display[key] ? "on " : "off"}  ${key}`,
-                  value: key as Placement,
-                  description: key === "panel" ? "full view, right side" : "one-line summary",
-                })),
-                {
-                  title: "hide everywhere",
-                  value: "__off" as Choice,
-                  description: "only the transcript shows the goal",
-                },
-              ],
-            })
-            if (choice === undefined) return
-            const next = applyChoice(display, choice)
-            await setDisplay((draft) => {
-              for (const key of PLACEMENTS) draft[key] = next[key]
-            })
-            context.ui.toast.show({
-              title: "Goal display",
-              message: choice === "__off" ? "hidden everywhere" : describe(next),
-              duration: 3000,
-            })
+            await openDisplayDialog()
             return
           } catch {
             // Fall through to the summary toast.

@@ -10,7 +10,6 @@
 export const PLACEMENTS = ["panel", "footer", "composer", "sidebar"] as const
 export type Placement = (typeof PLACEMENTS)[number]
 export type Display = Record<Placement, boolean>
-export type Choice = Placement | "__off"
 
 export const DEFAULTS: Display = { panel: true, footer: true, composer: false, sidebar: false }
 
@@ -84,17 +83,6 @@ export function applyParsed(current: Display, parsed: ParsedDisplay): Display {
   return next
 }
 
-/**
- * Apply a choice from the picker. Selecting a placement toggles only that one;
- * "__off" is the only choice that turns everything off. Merging those two cases
- * previously left every other placement defaulting to false, so picking one
- * silently switched the rest off.
- */
-export function applyChoice(current: Display, choice: Choice): Display {
-  if (choice === "__off") return { panel: false, footer: false, composer: false, sidebar: false }
-  return { ...current, [choice]: !current[choice] }
-}
-
 /** Set one placement explicitly, leaving the rest alone. */
 export function applySet(current: Display, placement: Placement, enabled: boolean): Display {
   return { ...current, [placement]: enabled }
@@ -104,4 +92,15 @@ export function applySet(current: Display, placement: Placement, enabled: boolea
 export function describe(current: Display): string {
   const on = PLACEMENTS.filter((key) => current[key])
   return on.length ? on.join(", ") : "hidden everywhere"
+}
+
+/** Cursor movement for the multi-select dialog, wrapping at both ends. */
+export function moveCursor(current: number, delta: number, length: number): number {
+  if (length === 0) return 0
+  return (((current + delta) % length) + length) % length
+}
+
+/** Toggle one placement in a draft, leaving the rest of the draft alone. */
+export function toggleDraft(draft: Display, placement: Placement): Display {
+  return { ...draft, [placement]: !draft[placement] }
 }

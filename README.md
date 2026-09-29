@@ -195,8 +195,47 @@ hide the loop in a headless client where nothing would be shown instead.
 A TUI only ever marks **its own location, and only the session its panel is showing**, so a
 terminal open in one project will not affect a headless run in another.
 
-> Editing `index.ts` or `rpc.ts` hot-reloads. Editing `tui.tsx` does **not** — restart the TUI
-> to pick it up, because the discovered `tui.ts` entrypoint is what gets watched.
+### Choosing where the goal is shown
+
+`/goal display` with no argument opens a checkbox dialog so several placements can be changed
+at once:
+
+```text
+  Where should the goal be shown?
+    up/down move · space toggles · enter applies · esc cancels
+
+  › [x] panel — full view, right side
+    [x] footer — one line under the composer
+    [ ] composer — one line above the composer
+    [ ] sidebar — one line at the bottom of the sidebar
+```
+
+Toggles land in a draft, so nothing is saved until <kbd>enter</kbd>, and <kbd>esc</kbd> discards
+them. There is no checkbox primitive in OpenTUI, so this is a focusable `box` with the
+checkmarks drawn as text and a keymap layer scoped to that box through `target`. TUI-only, and
+it says so elsewhere.
+
+For scripting, name placements on the command line instead — comma or space separated, with an
+optional trailing `on`/`off`:
+
+```text
+/goal display panel,composer          toggle each of those three
+/goal display panel,composer on       turn both on, leave the rest alone
+/goal display footer,sidebar off      turn both off, leave the rest alone
+```
+
+With an explicit `on`/`off` the named placements are set and the rest untouched; without one,
+each named placement toggles.
+
+The selection logic lives in `display.ts` as pure functions with checks in
+`display.test.ts`, because it could only otherwise be verified by clicking through the dialog —
+and the first version of it silently switched every other placement off when you picked one.
+The dialog's cursor movement and draft toggling are covered there too; only the layout is
+unverified, since that needs eyes.
+
+> Editing `index.ts`, `rpc.ts` or `display.ts` hot-reloads. Editing `tui.tsx` does **not** —
+> restart the TUI to pick it up, because the discovered `tui.ts` entrypoint is what gets
+> watched.
 
 ### Querying a goal while it is running
 
