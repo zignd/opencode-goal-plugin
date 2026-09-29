@@ -1,7 +1,6 @@
 import { appendFileSync } from "node:fs"
 import { Plugin } from "@opencode/plugin/tui"
 import { createEffect, createSignal, onCleanup, Show } from "solid-js"
-import type { Renderable } from "@opentui/core"
 import { Goal, HELP_TEXT as HELP, type GoalView } from "./rpc.js"
 import {
   applyParsed,
@@ -400,12 +399,10 @@ export default Plugin.define({
      *
      * So: one layer, registered once in the app slot, retargeted by a signal.
      */
-    const [dialogFrame, setDialogFrame] = createSignal<Renderable | null>(null)
     const [dialogDraft, setDialogDraft] = createSignal<Display | null>(null)
     const [dialogCursor, setDialogCursor] = createSignal(0)
 
     const closeDialog = () => {
-      setDialogFrame(null)
       setDialogDraft(null)
       setDialogCursor(0)
       context.ui.dialog.clear()
@@ -434,20 +431,11 @@ export default Plugin.define({
       context.ui.dialog.set({ size: "medium", centered: true })
       context.ui.dialog.show(
         () => (
-          <box
-            flexDirection="column"
-            focusable
-            ref={(element: Renderable) => {
-              trace("ref fired; element =", element ? element.constructor.name : "null")
-              setDialogFrame(element)
-              try {
-                element?.focus?.()
-                trace("after focus(), focused =", String(element?.focused))
-              } catch (error) {
-                trace("focus() THREW", (error as Error).message)
-              }
-            }}
-          >
+          <box flexDirection="column">
+            {/* focusable and focus() removed: tracing showed focus() returns
+                without the renderable ever reporting focused, so asking for
+                focus was a no-op that only obscured why keys never arrived. The
+                keymap layer is gated on dialogDraft() instead. */}
             <text fg={palette.base}>Where should the goal be shown?</text>
             <text fg={palette.muted}>  up/down move · space toggles · enter applies · esc cancels</text>
             <text> </text>
@@ -469,30 +457,39 @@ export default Plugin.define({
         // this is what guarantees the layer is never left targeted.
         () => {
           trace("dialog onClose")
-          setDialogFrame(null)
           setDialogDraft(null)
         },
       )
     }
 
-    // Registered once, from a component, and scoped to the dialog by `target`.
+    // Registered once from a component - keymap.layer throws
+    // "Keymap.Provider is missing" anywhere else - and gated on whether the
+    // dialog is open rather than on which renderable has focus.
     guard("display dialog keymap", () =>
       context.ui.slot({
         append: "app",
         render: () => {
           trace("app slot render fired (registering layer)")
           context.keymap.layer(() => {
-            const target = dialogFrame()
-            trace("layer factory ran; target =", target ? target.constructor.name : "null")
+            const open = dialogDraft() !== null
+            trace("layer factory ran; dialog open =", String(open))
             return {
-            target: () => dialogFrame(),
+              // NOT `target`. That limits the layer to a renderable that has
+              // focus, and tracing showed the dialog's box never gains focus
+              // (focus() returns without setting it), which left the layer
+              // permanently inert - registered, correctly targeted, and never
+              // receiving a key. `enabled` gates on state instead, and the
+              // dialog being modal is what makes stealing keys safe.
+              enabled: open,
             commands: [
               {
                 id: "goal.display.up",
                 bind: "up",
                 run: () => {
                   trace("KEY up")
-                  return moveDialogCursor(-1)
+                  if (!dialogDraft()) return undefined
+                  setDialogCursor((index) => moveCursor(index, -1, PLACEMENTS.length))
+                  return undefined
                 },
               },
               {
@@ -500,7 +497,9 @@ export default Plugin.define({
                 bind: "down",
                 run: () => {
                   trace("KEY down")
-                  return moveDialogCursor(1)
+                  if (!dialogDraft()) return undefined
+                  setDialogCursor((index) => moveCursor(index, 1, PLACEMENTS.length))
+                  return undefined
                 },
               },
               {

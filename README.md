@@ -213,15 +213,23 @@ at once:
 Toggles land in a draft, so nothing is saved until <kbd>enter</kbd>, and <kbd>esc</kbd> discards
 them. TUI-only, and it says so elsewhere.
 
-There is no checkbox primitive in OpenTUI, so this is a focusable `box` with the checkmarks
-drawn as text, plus a keymap layer scoped to that box through `target`. Two constraints are
-easy to get wrong and both produce a dialog that renders but accepts no keys:
+There is no checkbox primitive in OpenTUI, so this is a plain `box` with the checkmarks drawn
+as text, plus a keymap layer gated on the dialog being open. Three things are easy to get
+wrong here, and every one of them produces a dialog that renders perfectly and accepts no keys
+at all:
 
 - `context.keymap.layer` **must be called from a component** — the same reason calling it from
   `setup` throws `Keymap.Provider is missing`. The layer is registered once in the `app` slot
-  and retargeted, rather than registered per dialog.
-- The layer's `target` must read a **signal**. Solid only tracks signals, so a plain variable
-  is read once while still `null` and the layer stays inert.
+  rather than per dialog, and a `try`/`catch` around it will hide the throw.
+- Gate with **`enabled`**, not `target`. `target` limits a layer to a renderable that currently
+  has focus; the dialog's box never gains focus, so a `target`ed layer stays permanently inert
+  while looking perfectly correct in the source.
+- Anything read inside the layer factory or a handler must be a **signal**. Solid only tracks
+  signals, so a plain variable is read once and never again.
+
+If a dialog ever renders but ignores keys, trace whether the handlers run at all. "Handler never
+ran" means the layer is not receiving keys; "handler ran and nothing moved" means the state is
+wrong.
 
 For scripting, name placements on the command line instead — comma or space separated, with an
 optional trailing `on`/`off`:
