@@ -211,9 +211,17 @@ at once:
 ```
 
 Toggles land in a draft, so nothing is saved until <kbd>enter</kbd>, and <kbd>esc</kbd> discards
-them. There is no checkbox primitive in OpenTUI, so this is a focusable `box` with the
-checkmarks drawn as text and a keymap layer scoped to that box through `target`. TUI-only, and
-it says so elsewhere.
+them. TUI-only, and it says so elsewhere.
+
+There is no checkbox primitive in OpenTUI, so this is a focusable `box` with the checkmarks
+drawn as text, plus a keymap layer scoped to that box through `target`. Two constraints are
+easy to get wrong and both produce a dialog that renders but accepts no keys:
+
+- `context.keymap.layer` **must be called from a component** — the same reason calling it from
+  `setup` throws `Keymap.Provider is missing`. The layer is registered once in the `app` slot
+  and retargeted, rather than registered per dialog.
+- The layer's `target` must read a **signal**. Solid only tracks signals, so a plain variable
+  is read once while still `null` and the layer stays inert.
 
 For scripting, name placements on the command line instead — comma or space separated, with an
 optional trailing `on`/`off`:
