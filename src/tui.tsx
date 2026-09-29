@@ -2,6 +2,7 @@ import { Plugin } from "@opencode/plugin/tui"
 import { createEffect, createSignal, onCleanup, Show } from "solid-js"
 import { Goal, HELP_TEXT as HELP, type GoalView } from "./rpc.js"
 import { formatTurns } from "./budget.js"
+import { listen } from "./listen.js"
 import {
   applyAll,
   applyMutation,
@@ -176,17 +177,21 @@ export default Plugin.define({
       const fingerprint = `${state.status}:${state.turns}:${state.reason}`
       if (announced.get(state.sessionID) === fingerprint) return
       announced.set(state.sessionID, fingerprint)
-      context.ui.toast.show({
-        title:
-          state.status === "done"
-            ? "Goal achieved"
-            : state.status === "blocked"
-              ? "Goal judged unachievable"
-              : "Goal paused",
-        message: state.reason || state.goal,
-        variant: state.status === "done" ? "success" : "warning",
-        duration: 8000,
-      })
+      try {
+        context.ui.toast.show({
+          title:
+            state.status === "done"
+              ? "Goal achieved"
+              : state.status === "blocked"
+                ? "Goal judged unachievable"
+                : "Goal paused",
+          message: state.reason || state.goal,
+          variant: state.status === "done" ? "success" : "warning",
+          duration: 8000,
+        })
+      } catch {
+        // The state is already tracked; losing the toast is not worth the listener.
+      }
     }
 
     /** Events arrive for every location, so ignore other projects entirely. */
@@ -196,6 +201,105 @@ export default Plugin.define({
       const trim = (value: string) => value.replace(/\/+$/, "")
       return trim(directory) === trim(mine)
     }
+
+    /**
+     * Events are the fast path, but they are only pushed, so anything that missed
+     * them has to ask. Two things did: a session opened after its goal started
+     * (the footer, composer and sidebar never fetched anything, only the panel
+     * did), and a listener that had silently stopped hearing.
+     */
+    const fingerprint = (state: GoalView) => `${state.status}:${state.turns}:${state.reason}`
+    const sameView = (a: GoalView, b: GoalView) =>
+      JSON.stringify({ ...a, updatedAt: 0 }) === JSON.stringify({ ...b, updatedAt: 0 })
+
+    /** Read a session's state straight from the server. */
+    const refresh = async (sessionID: string) => {
+      try {
+        const result = asGet(await rpc.get({ sessionID }))
+        const before = states()[sessionID]
+        if (!result.state) {
+          if (before) {
+            announced.delete(sessionID)
+            track(sessionID, null)
+          }
+          return
+        }
+        // updatedAt is stamped when the view is built, so it always differs; without
+        // this every poll would replace the state and repaint for nothing.
+        if (before && sameView(before, result.state)) return
+        track(sessionID, result.state)
+        if (result.state.status === "active") return
+        if (before?.status === "active") {
+          // It ended while nothing was listening. Say so, once.
+          announce(result.state)
+        } else {
+          // Already over when first seen. Record that, so a later event carrying
+          // the same result does not announce a goal that finished long ago.
+          announced.set(sessionID, fingerprint(result.state))
+        }
+      } catch {
+        // Server unreachable; the next attempt tries again.
+      }
+    }
+
+    /** Sessions something is showing, so a resync knows what to re-read. */
+    const fetched = new Set<string>()
+    const ensureFetched = (sessionID: string) => {
+      if (fetched.has(sessionID)) return
+      fetched.add(sessionID)
+      void refresh(sessionID)
+    }
+    const resync = async () => {
+      const known = new Set([...fetched, ...Object.keys(states())])
+      await Promise.all([...known].map(refresh))
+    }
+
+    /** Backstop for a half-open stream, which reports no error to reconnect on. */
+    const pollTimer = setInterval(() => {
+      for (const [sessionID, state] of Object.entries(states())) {
+        if (state.status === "active") void refresh(sessionID)
+      }
+    }, 5000)
+
+    type EventName = "changed" | "panel" | "display" | "notice" | "settings" | "help"
+    type RpcEvent = { readonly data: unknown; readonly location?: { readonly directory?: string } }
+
+    /**
+     * A handler that throws is a bug worth seeing, so it gets a toast, but never
+     * more than one per half minute. A dropped stream is routine and stays quiet.
+     */
+    let lastHandlerErrorAt = 0
+    const reportListenError = (error: unknown, phase: "handler" | "stream" | "resume") => {
+      if (phase !== "handler") return
+      if (Date.now() - lastHandlerErrorAt < 30_000) return
+      lastHandlerErrorAt = Date.now()
+      try {
+        context.ui.toast.show({
+          title: "Goal plugin",
+          message: (error instanceof Error ? error.message : String(error)).slice(0, 120),
+          variant: "error",
+          duration: 6000,
+        })
+      } catch {
+        // Nowhere left to report to.
+      }
+    }
+
+    /**
+     * Subscribe to a plugin event. Not `rpc.events.on`: that ends for good the
+     * first time a handler throws or the stream closes, and says nothing, which
+     * is how the areas stopped updating until the panel was reopened.
+     */
+    const on = (
+      name: EventName,
+      handler: (event: RpcEvent) => void | Promise<void>,
+      onResume?: () => void | Promise<void>,
+    ) =>
+      listen<RpcEvent>(
+        (signal) => rpc.events.subscribe(name, { signal }) as AsyncIterable<RpcEvent>,
+        handler,
+        { onResume, onError: reportListenError },
+      )
 
     // Each registration is guarded on its own. A throw anywhere in setup
     // discards the entire plugin, so one bad call would otherwise cost the
@@ -210,7 +314,7 @@ export default Plugin.define({
     }
 
     guard("rpc events", () =>
-      rpc.events.on("changed", (event) => {
+      on("changed", (event) => {
         if (!isLocal(event.location?.directory)) {
           return
         }
@@ -222,11 +326,18 @@ export default Plugin.define({
         }
         track(sessionID, state)
         announce(state)
-      }),
+      }, resync),
     )
 
     /** One line, for the slots with no room for the full view. */
     const Compact = (props: { sessionID?: string }) => {
+      // Without this the footer, composer and sidebar showed nothing for a goal
+      // already running when the session was opened: they only ever waited for an
+      // event, and no event was coming.
+      createEffect(() => {
+        const sessionID = props.sessionID
+        if (sessionID) ensureFetched(sessionID)
+      })
       const view = () => (props.sessionID ? states()[props.sessionID] : undefined)
       const word = (status: GoalView["status"]) =>
         status === "active" ? "running" : status === "done" ? "achieved" : status === "blocked" ? "unachievable" : "paused"
@@ -296,19 +407,9 @@ export default Plugin.define({
 
     /** Pull state for a session the panel opened before any event arrived. */
     const prime = async (sessionID: string) => {
-      try {
-        const result = asGet(await rpc.get({ sessionID }))
-        if (result.state) {
-          track(sessionID, result.state)
-          announced.set(
-            sessionID,
-            `${result.state.status}:${result.state.turns}:${result.state.reason}`,
-          )
-          void attach(sessionID)
-        }
-      } catch {
-        // Nothing to show yet.
-      }
+      fetched.add(sessionID)
+      await refresh(sessionID)
+      if (states()[sessionID]) void attach(sessionID)
     }
 
     const Body = (props: { view: GoalView; width?: number }) => {
@@ -407,7 +508,7 @@ export default Plugin.define({
     }
 
     guard("panel request", () =>
-      rpc.events.on("panel", (event) => {
+      on("panel", (event) => {
         if (!isLocal(event.location?.directory)) return
         try {
           if (context.ui.panel.current()?.name === PANEL) context.ui.panel.close()
@@ -462,7 +563,7 @@ export default Plugin.define({
     }
 
     guard("notice request", () =>
-      rpc.events.on("notice", (event) => {
+      on("notice", (event) => {
         if (!isLocal(event.location?.directory)) return
         const { title, message, variant } = event.data as {
           title?: string
@@ -475,7 +576,7 @@ export default Plugin.define({
     )
 
     guard("settings request", () =>
-      rpc.events.on("settings", async (event) => {
+      on("settings", async (event) => {
         if (!isLocal(event.location?.directory)) return
         try {
           // The server owns the values; the TUI just renders them. `dialog.alert`
@@ -492,7 +593,7 @@ export default Plugin.define({
     )
 
     guard("help request", () =>
-      rpc.events.on("help", async (event) => {
+      on("help", async (event) => {
         if (!isLocal(event.location?.directory)) return
         try {
           context.ui.dialog.set({ size: "large", centered: true })
@@ -504,7 +605,7 @@ export default Plugin.define({
     )
 
     guard("display request", () =>
-      rpc.events.on("display", async (event) => {
+      on("display", async (event) => {
         if (!isLocal(event.location?.directory)) return
         const { placements, enabled } = event.data as {
           placements?: string[]
@@ -519,9 +620,9 @@ export default Plugin.define({
         // No placement named: open the multi-select dialog, so several can be
         // changed in one go. The command line still works for scripting.
         //
-        // Deliberately not wrapped in a try/catch. A swallowed failure here left
-        // an open dialog that accepted no keys at all and reported nothing, so
-        // if this ever throws again let it surface.
+        // Not wrapped in a try/catch, on purpose: a failure here should be seen.
+        // `on` reports it as a toast and keeps listening, where the stock
+        // rpc.events.on used to end the subscription for the rest of the session.
         if (named.length === 0) {
           await openDisplayPicker()
           return
@@ -551,6 +652,7 @@ export default Plugin.define({
 
     return () => {
       clearInterval(presenceTimer)
+      clearInterval(pollTimer)
       for (const dispose of cleanups.reverse()) {
         try {
           dispose()
