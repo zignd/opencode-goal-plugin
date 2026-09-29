@@ -17,7 +17,7 @@ import {
   renderSettings,
   resolve,
   type Overrides,
-} from "./settings.ts"
+} from "../src/settings.ts"
 
 const OPTIONS = { maxTurns: 20 as const, stall: DEFAULT_STALL, quiet: false, judge: null }
 

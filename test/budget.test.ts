@@ -15,7 +15,7 @@ import {
   readBudgetOption,
   UNLIMITED_CAVEAT,
   UNLIMITED_HINT,
-} from "./budget.ts"
+} from "../src/budget.ts"
 
 describe("isExhausted", () => {
   test("is not spent at the start", () => {

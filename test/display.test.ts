@@ -18,7 +18,7 @@ import {
   parseDisplayArgument,
   seedDisplay,
   type Display,
-} from "./display.ts"
+} from "../src/display.ts"
 
 const BOTH: Display = { panel: true, footer: true, composer: false, sidebar: false }
 

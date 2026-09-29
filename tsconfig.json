@@ -19,14 +19,8 @@
   },
   "include": [
     "index.ts",
-    "rpc.ts",
     "tui.ts",
-    "tui.tsx",
-    "display.ts",
-    "display.test.ts",
-    "budget.ts",
-    "budget.test.ts",
-    "settings.ts",
-    "settings.test.ts"
+    "src",
+    "test"
   ]
 }

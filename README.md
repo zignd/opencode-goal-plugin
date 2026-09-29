@@ -410,16 +410,20 @@ OpenCode's V2 plugin API; no code was copied from either project.
 
 | File | Runs in | Role |
 | --- | --- | --- |
-| `index.ts` | OpenCode server | The loop itself, plus the RPC the TUI reads. |
-| `rpc.ts` | shared | The contract between the two halves. |
-| `tui.ts` | TUI | Discovered entrypoint; re-exports the panel. |
-| `tui.tsx` | TUI | The panel, the summary lines, the toasts and dialogs. JSX needs the `.tsx` extension. |
-| `display.ts` | TUI | Which placements are on, as pure functions. |
-| `display.test.ts` | TUI | Checks for the above. Plain node, no test framework. |
-| `budget.ts` | server | Turn budget parsing, display and the exhaustion test, as pure functions. |
-| `budget.test.ts` | server | Checks for the above. |
-| `settings.ts` | server | Session settings: parsing, merging and the `/goal settings` summary. |
-| `settings.test.ts` | server | Checks for the above. |
+| `index.ts` | OpenCode server | Discovered entrypoint; re-exports `src/server.ts`. |
+| `tui.ts` | TUI | Discovered entrypoint; re-exports `src/tui.tsx`. |
+| `src/server.ts` | OpenCode server | The loop, the `/goal` command, and the RPC the TUI reads. |
+| `src/tui.tsx` | TUI | The panel, the summary lines, the toasts and dialogs. |
+| `src/rpc.ts` | shared | The contract between the two halves, and the `/goal help` text. |
+| `src/budget.ts` | server | Turn budget: parsing, the exhaustion gate, formatting. |
+| `src/display.ts` | TUI | Which placements are shown, `/goal display` argument parsing. |
+| `src/settings.ts` | server | The other three settings, override resolution, `/goal settings`. |
+| `test/*.test.ts` | — | Checks for the three pure modules. |
+
+`index.ts` and `tui.ts` have to stay at the root: OpenCode discovers a plugin by looking for
+those two names in the plugin directory, and ignores a `src/` layout for discovery. They are
+thin entrypoints, and everything they serve lives under `src/`. `tui.ts` exists separately from
+`tui.tsx` because JSX needs the `.tsx` extension to compile.
 
 ## Development
 
