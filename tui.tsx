@@ -436,6 +436,23 @@ export default Plugin.define({
       })
     }
 
+    guard("settings request", () =>
+      rpc.events.on("settings", async (event) => {
+        if (!isLocal(event.location?.directory)) return
+        try {
+          // The server owns the values; the TUI just renders them. `dialog.alert`
+          // rather than a custom dialog, because plugin dialogs receive no key
+          // input in this host — see the note by the display picker.
+          const text = (event.data as { text?: string }).text
+          if (!text) return
+          context.ui.dialog.set({ size: "large", centered: true })
+          await context.ui.dialog.alert({ title: "/goal settings", message: text })
+        } catch {
+          // No dialog available.
+        }
+      }),
+    )
+
     guard("help request", () =>
       rpc.events.on("help", async (event) => {
         if (!isLocal(event.location?.directory)) return

@@ -34,6 +34,10 @@ export const HELP_TEXT = `/goal <text>          set the goal and start working
 /goal budget 40       set a turn budget for this session
 /goal budget unlimited  no turn limit; the judge and guards are the only stops
 /goal budget default  back to the configured maxTurns
+/goal stall <n>      turns with no tools before the loop gives up
+/goal quiet <on|off> whether the panel replaces the transcript notices
+/goal judge <model>  provider/model[#variant] used to judge each turn
+/goal settings       show every setting, and where it came from
 
 Completion contract — lines the judge uses to decide "done":
   verify: / verified by:    the command or artifact that proves it
@@ -173,5 +177,17 @@ export const Goal = Rpc.define({
      * the transcript where it would cost a model call.
      */
     help: { schema: empty },
+    /**
+     * `/goal settings`. The server renders the summary, because it is the side
+     * that knows the values, and the TUI only displays it in a dialog.
+     */
+    settings: {
+      schema: {
+        type: "object",
+        properties: { text: { type: "string" } },
+        required: ["text"],
+        additionalProperties: false,
+      },
+    },
   },
 })

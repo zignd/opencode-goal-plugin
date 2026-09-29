@@ -133,6 +133,33 @@ default budget looks like this:
 The judge is consulted once per settled turn, including the last one, so a full budget is 21
 agent executions and 21 judge calls.
 
+### Session settings
+
+Four settings, each with a default in the plugin options and an override for the current
+session. The override applies at once, including to a goal that is already running, and lasts
+until the session ends — it never rewrites your config.
+
+| Subcommand | Option | Notes |
+| --- | --- | --- |
+| `/goal budget <n\|unlimited\|default>` | `maxTurns` | See [Removing the turn limit](#removing-the-turn-limit) |
+| `/goal stall <n\|default>` | `stallLimit` | Turns with **no tool calls** before giving up |
+| `/goal quiet <on\|off\|default>` | `quiet` | When on, the panel replaces the loop's transcript notices |
+| `/goal judge <provider/model[#variant]\|default>` | `judgeModel` | Cheaper and sharper models judge better and cost less |
+| `/goal settings` | — | Shows all four, and whether each is a session override or the config default |
+
+`/goal settings` opens a dialog in the TUI and prints to the transcript elsewhere:
+
+```text
+Turn budget   20   (config default)
+Stall limit   5 turns with no tools   (this session)
+Quiet mode    on   (this session)
+Judge model   openrouter/perceptron/perceptron-mk1.5   (this session)
+```
+
+A model is written `provider/model`, and the model half may itself contain slashes —
+`openrouter/perceptron/perceptron-mk1.5` is valid. `#variant` selects a variant if the model
+has one.
+
 ### Removing the turn limit
 
 The budget is the loop's hard ceiling on cost and wall-clock time. You can lift it per session:
@@ -194,6 +221,10 @@ drives that session's loop.
 | `/goal budget <n>` | Set a turn budget for this session, applied at once if a goal is running. |
 | `/goal budget unlimited` | No turn limit. |
 | `/goal budget default` | Back to the configured `maxTurns`. |
+| `/goal stall <n>` | Turns with no tool calls before the loop gives up. |
+| `/goal quiet <on\|off>` | Whether the panel replaces the loop's transcript notices. |
+| `/goal judge <model>` | `provider/model[#variant]` used to judge each turn. |
+| `/goal settings` | Every setting and where its value came from. |
 
 ### The session panel (TUI)
 
@@ -360,6 +391,8 @@ OpenCode's V2 plugin API; no code was copied from either project.
 | `display.test.ts` | TUI | Checks for the above. Plain node, no test framework. |
 | `budget.ts` | server | Turn budget parsing, display and the exhaustion test, as pure functions. |
 | `budget.test.ts` | server | Checks for the above. |
+| `settings.ts` | server | Session settings: parsing, merging and the `/goal settings` summary. |
+| `settings.test.ts` | server | Checks for the above. |
 
 ## Development
 
@@ -370,6 +403,7 @@ npm install
 npx tsc -p tsconfig.json
 node display.test.ts
 node budget.test.ts
+node settings.test.ts
 ```
 
 Bumping support for a new OpenCode release means bumping `@opencode/plugin` and re-running the

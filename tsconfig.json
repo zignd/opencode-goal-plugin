@@ -25,6 +25,8 @@
     "display.ts",
     "display.test.ts",
     "budget.ts",
-    "budget.test.ts"
+    "budget.test.ts",
+    "settings.ts",
+    "settings.test.ts"
   ]
 }

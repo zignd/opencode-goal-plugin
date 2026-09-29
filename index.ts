@@ -10,6 +10,18 @@ import {
   UNLIMITED_CAVEAT,
   type Budget,
 } from "./budget.js"
+import {
+  DEFAULT_STALL,
+  modelLabel,
+  NO_OVERRIDES,
+  parseCount,
+  parseFlag,
+  parseModel,
+  renderSettings,
+  resolve,
+  type ModelRef,
+  type Overrides,
+} from "./settings.js"
 // Pure, no JSX, so the server can share the parser with the TUI.
 import { parseDisplayArgument } from "./display.js"
 
@@ -72,8 +84,6 @@ type GoalState = {
   repeats: number
   reason?: string
 }
-
-type ModelRef = { providerID: string; id: string; variant?: string }
 
 /** Only these prefixes are treated as contract fields, so a goal that merely
  *  contains a colon ("Fix bug: the parser drops commas") is never mangled. */
@@ -280,9 +290,11 @@ export default Plugin.define({
       warning: budgetWarning,
     } = readBudgetOption(ctx.options.maxTurns)
     if (budgetWarning) console.warn(`[goal] ${budgetWarning}`)
-    const stallLimit =
-      typeof ctx.options.stallLimit === "number" ? ctx.options.stallLimit : DEFAULT_STALL_LIMIT
-    const judgeOverride = ctx.options.judgeModel as ModelRef | undefined
+    const configuredStall =
+      typeof ctx.options.stallLimit === "number" && ctx.options.stallLimit >= 1
+        ? ctx.options.stallLimit
+        : DEFAULT_STALL
+    const configuredJudge = (ctx.options.judgeModel ?? null) as ModelRef | null
     /**
      * Whether to drop the loop's reporting from the transcript. Off by default:
      * the panel is an addition to the chat, not a replacement for it, and a
@@ -292,9 +304,9 @@ export default Plugin.define({
      * Only ever effective when a panel is actually displaying the state, so
      * turning it on in a headless client cannot hide the loop entirely.
      */
-    const quietOption = ctx.options.quiet === true
+    const configuredQuiet = ctx.options.quiet === true
     const suppressed = async (sessionID: string) =>
-      quietOption && (await isAttached(sessionID))
+      (await settingsFor(sessionID)).quiet && (await isAttached(sessionID))
     const judging = new Set<string>()
 
     const key = (sessionID: string) => `goal:${sessionID}`
@@ -307,35 +319,96 @@ export default Plugin.define({
      * from then on. Absent means "use the plugin option", so a one-off
      * /goal budget never silently rewrites the user's config.
      */
-    const budgetKey = (sessionID: string) => `budget:${sessionID}`
+    /**
+     * All four settings in one record, so the summary, the setters and the loop
+     * itself cannot disagree about what is in force. `settings:<session>` holds
+     * `{ maxTurns?, stall?, quiet?, judge? }` with only the overridden keys
+     * present; a key that is `null` means the plugin option applies.
+     */
+    const settingsKey = (sessionID: string) => `settings:${sessionID}`
+
+    const configured = {
+      maxTurns: configuredBudget,
+      stall: configuredStall,
+      quiet: configuredQuiet,
+      judge: configuredJudge,
+    }
+
+    /**
+     * Stored per key, and only when overridden. The earlier budget-only record
+     * is still read, so a budget set before this landed is not lost.
+     */
+    const readOverrides = async (sessionID: string): Promise<Overrides> => {
+      const stored = (await ctx.storage.get(settingsKey(sessionID))) as
+        | Record<string, unknown>
+        | undefined
+      const overrides: Overrides = { ...NO_OVERRIDES }
+      if (stored && typeof stored === "object") {
+        if ("maxTurns" in stored) overrides.maxTurns = (stored.maxTurns as number | null) ?? null
+        if (typeof stored.stall === "number") overrides.stall = stored.stall
+        if (typeof stored.quiet === "boolean") overrides.quiet = stored.quiet
+        if ("judge" in stored) overrides.judge = (stored.judge as ModelRef | null) ?? null
+      }
+      if (overrides.maxTurns === null) {
+        // Migrate the old single-value record if one is lying around.
+        const legacy = (await ctx.storage.get(`budget:${sessionID}`)) as { budget?: unknown } | undefined
+        if (legacy && typeof legacy === "object" && "budget" in legacy) {
+          overrides.maxTurns = (legacy.budget as number | null) ?? null
+        }
+      }
+      return overrides
+    }
+
+    const writeOverride = async (
+      sessionID: string,
+      patch: Partial<Record<"maxTurns" | "stall" | "quiet" | "judge", Budget | number | boolean | ModelRef | null>>,
+    ) => {
+      const stored = (await ctx.storage.get(settingsKey(sessionID))) as Record<string, unknown> | undefined
+      const next: Record<string, unknown> = { ...(stored ?? {}) }
+      for (const [key, value] of Object.entries(patch)) {
+        if (value === undefined) delete next[key]
+        else next[key] = value
+      }
+      if (Object.keys(next).length === 0) await ctx.storage.remove(settingsKey(sessionID))
+      else await ctx.storage.set(settingsKey(sessionID), next as any)
+    }
+
+    /** Options merged with this session's overrides. */
+    const settingsFor = async (sessionID: string) => resolve(configured, await readOverrides(sessionID))
+
+    /**
+     * Apply a changed setting to a running goal so the loop picks it up now,
+     * rather than at the next goal. The budget lives on the goal state; the
+     * other three are read per turn, so only maxTurns needs writing back.
+     */
+    const applyLiveBudget = async (sessionID: string, maxTurns: Budget) => {
+      const active = await read(sessionID)
+      if (active) await write(sessionID, { ...active, maxTurns })
+    }
+
+    const budgetKey = (sessionID: string) => `settings:${sessionID}`
     /**
      * Stored as `{ budget }` rather than the bare value, because `null` is both
      * "unlimited" and what a missing record reads back as. Storing the bare
      * value meant setting unlimited persisted nothing and silently reverted to
      * the configured default.
      */
-    const readBudgetOverride = async (
-      sessionID: string,
-    ): Promise<{ set: boolean; budget: Budget }> => {
-      const stored = (await ctx.storage.get(budgetKey(sessionID))) as
-        | { budget?: unknown }
-        | undefined
-      if (!stored || typeof stored !== "object" || !("budget" in stored)) {
-        return { set: false, budget: configuredBudget }
-      }
-      return {
-        set: true,
-        budget: typeof stored.budget === "number" ? stored.budget : null,
-      }
-    }
-    /** `undefined` clears the override, so the plugin option applies again. */
-    const writeBudgetOverride = async (sessionID: string, budget: Budget | undefined) => {
-      if (budget === undefined) await ctx.storage.remove(budgetKey(sessionID))
-      else await ctx.storage.set(budgetKey(sessionID), { budget })
-    }
 
     const budgetForSession = async (sessionID: string): Promise<Budget> =>
-      (await readBudgetOverride(sessionID)).budget
+      (await settingsFor(sessionID)).maxTurns
+
+    /**
+     * Whether a TUI is running for this session's directory. Used by the three
+     * subcommands that can only be served there, so they all fall back to a
+     * transcript reply in the same way.
+     */
+    const tuiHere = async (sessionID: string): Promise<boolean> => {
+      const session = (await ctx.session.get({ sessionID })) as {
+        location?: { directory?: string }
+      }
+      const directory = session?.location?.directory
+      return Boolean(directory) && (await isTuiPresent(directory!))
+    }
 
     const write = async (sessionID: string, state: GoalState | undefined) => {
       if (state) await ctx.storage.set(key(sessionID), state as any)
@@ -487,7 +560,8 @@ export default Plugin.define({
       say(sessionID, `${text}\n\n(The goal loop has stopped. Do not start new work; reply in one short sentence.)`)
 
     const resolveJudgeModel = async (sessionID: string): Promise<ModelRef> => {
-      if (judgeOverride) return judgeOverride
+      const sessionJudge = (await settingsFor(sessionID)).judge
+      if (sessionJudge) return sessionJudge
       const { model } = await lastAssistantTurn(ctx, sessionID)
       if (model) return model
       const fallback = await ctx.model.default()
@@ -497,7 +571,7 @@ export default Plugin.define({
 
     const judge = async (sessionID: string, state: GoalState) => {
       const { text, model, toolCalls } = await lastAssistantTurn(ctx, sessionID)
-      const chosen = judgeOverride ?? model ?? (await resolveJudgeModel(sessionID))
+      const chosen = (await settingsFor(sessionID)).judge ?? model ?? (await resolveJudgeModel(sessionID))
       const prompt = JUDGE_PROMPT.replace("{{GOAL}}", state.goal)
         .replace("{{CONTRACT}}", renderContract(state.contract))
         .replace("{{TURN}}", String(state.turns + 1))
@@ -532,9 +606,7 @@ export default Plugin.define({
               // Gated on TUI *presence*, not on attach. Attach is dropped when
               // the panel closes, so gating on it made this command able to
               // close the panel but never reopen it.
-              const session = (await ctx.session.get({ sessionID })) as { location?: { directory?: string } }
-              const directory = session?.location?.directory
-              if (directory && (await isTuiPresent(directory))) {
+              if (await tuiHere(sessionID)) {
                 try {
                   await rpc.events.emit("panel", {})
                 } catch {}
@@ -553,12 +625,10 @@ export default Plugin.define({
             if (sub === "budget") {
               // No argument: report. The setter lives outside this branch
               // because it takes one.
-              const override = await readBudgetOverride(sessionID)
+              const current = await settingsFor(sessionID)
               await note(
                 sessionID,
-                `Turn budget for this session: ${budgetLabel(state?.maxTurns ?? override.budget)}${
-                  override.set ? "" : " (the configured default)"
-                }`,
+                `Turn budget for this session: ${budgetLabel(state?.maxTurns ?? current.maxTurns)}`,
               )
               return
             }
@@ -566,11 +636,7 @@ export default Plugin.define({
               // Inside this block on purpose: every subcommand listed here has
               // to return before the clear fall-through at the bottom, or
               // `/goal help` silently drops the goal on the floor.
-              const session = (await ctx.session.get({ sessionID })) as {
-                location?: { directory?: string }
-              }
-              const directory = session?.location?.directory
-              if (!(directory && (await isTuiPresent(directory)))) {
+              if (!(await tuiHere(sessionID))) {
                 await note(sessionID, HELP_TEXT)
                 return
               }
@@ -643,14 +709,12 @@ export default Plugin.define({
               return
             }
             const next: Budget = parsed.kind === "default" ? configuredBudget : parsed.budget
-            await writeBudgetOverride(
-              sessionID,
-              parsed.kind === "default" ? undefined : next,
-            )
+            await writeOverride(sessionID, {
+              maxTurns: parsed.kind === "default" ? undefined : next,
+            })
             // Apply straight away when a goal is already running, rather than
             // waiting for the next one to be set.
-            const active = await read(sessionID)
-            if (active) await write(sessionID, { ...active, maxTurns: next })
+            await applyLiveBudget(sessionID, next)
             await note(
               sessionID,
               parsed.kind === "default"
@@ -662,12 +726,72 @@ export default Plugin.define({
             return
           }
 
-          if (sub === "display") {
-            const session = (await ctx.session.get({ sessionID })) as {
-              location?: { directory?: string }
+          if (sub === "stall" || sub === "quiet" || sub === "judge" || sub === "settings") {
+            if (sub === "settings") {
+              const summary = renderSettings(await settingsFor(sessionID))
+              if (await tuiHere(sessionID)) {
+                try {
+                  await rpc.events.emit("settings", { text: summary })
+                  return
+                } catch {}
+              }
+              // No TUI to show a dialog, so print it in the transcript instead.
+              await note(sessionID, summary)
+              return
             }
-            const directory = session?.location?.directory
-            if (!(directory && (await isTuiPresent(directory)))) {
+            if (sub === "stall") {
+              const parsed = parseCount(argument, "stall")
+              if (parsed.kind === "invalid") {
+                await note(sessionID, "Give me a whole number of turns, or default. For example: /goal stall 4.")
+                return
+              }
+              const next = parsed.kind === "clear" ? configuredStall : parsed.value
+              await writeOverride(sessionID, { stall: parsed.kind === "clear" ? undefined : next })
+              await note(
+                sessionID,
+                parsed.kind === "clear"
+                  ? `Stall limit reset to the configured default (${next}).`
+                  : `Stall limit set to ${next} turns with no tools.`,
+              )
+              return
+            }
+            if (sub === "quiet") {
+              const parsed = parseFlag(argument)
+              if (parsed.kind === "invalid") {
+                await note(sessionID, "Give me on, off, or default. For example: /goal quiet off.")
+                return
+              }
+              const next = parsed.kind === "clear" ? configuredQuiet : parsed.value
+              await writeOverride(sessionID, { quiet: parsed.kind === "clear" ? undefined : next })
+              await note(
+                sessionID,
+                parsed.kind === "clear"
+                  ? `Quiet mode reset to the configured default (${next ? "on" : "off"}).`
+                  : `Quiet mode ${next ? "on" : "off"} — ${next ? "the panel replaces the loop's transcript notices" : "the loop writes its turn banner and completion notices as well as showing the panel"}.`,
+              )
+              return
+            }
+            const parsed = parseModel(argument)
+            if (parsed.kind === "invalid") {
+              await note(
+                sessionID,
+                "Give me provider/model, optionally #variant, or default. For example: /goal judge openrouter/google/gemini-3-flash-preview.",
+              )
+              return
+            }
+            const next = parsed.kind === "clear" ? configuredJudge : parsed.value
+            await writeOverride(sessionID, { judge: parsed.kind === "clear" ? undefined : next })
+            await note(
+              sessionID,
+              parsed.kind === "clear"
+                ? `Judge model reset to the configured default (${modelLabel(next)}).`
+                : `Judge model set to ${modelLabel(next)}.`,
+            )
+            return
+          }
+
+          if (sub === "display") {
+            if (!(await tuiHere(sessionID))) {
               await note(
                 sessionID,
                 "Where the goal is shown is a terminal-UI setting. Use /goal status here.",
@@ -808,7 +932,7 @@ export default Plugin.define({
               `⏸ Goal paused — looping: the agent has now repeated the same reply ${repeats} turns running without acting. Judge said: ${verdict.reason}\nThe goal is not reachable in this session. Re-scope it with /goal <new text>.`,
             )
           }
-          if (stalled >= stallLimit) {
+          if (stalled >= (await settingsFor(sessionID)).stall) {
             await write(sessionID, { ...looping, status: "paused" })
             return terminal(
               sessionID,
