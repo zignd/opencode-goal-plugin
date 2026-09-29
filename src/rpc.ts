@@ -35,6 +35,7 @@ export const HELP_TEXT = `/goal <text>          set the goal and start working
 /goal budget inf        no turn limit (also: unlim, unlimited, none, ∞)
 /goal budget default    back to the configured maxTurns
 /goal stall <n>        turns with no tools before the loop gives up
+/goal poll <n>         turns re-reading an unchanged result before it counts as polling
 /goal quiet <on|off>   whether the panel replaces the transcript notices
 /goal judge <model>    provider/model[#variant] used to judge each turn
 /goal settings         show every setting, and where it came from

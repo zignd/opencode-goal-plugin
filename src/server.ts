@@ -13,6 +13,7 @@ import {
   type Budget,
 } from "./budget.js"
 import {
+  DEFAULT_POLL,
   DEFAULT_STALL,
   modelLabel,
   NO_OVERRIDES,
@@ -306,6 +307,11 @@ export default Plugin.define({
       typeof ctx.options.stallLimit === "number" && ctx.options.stallLimit >= 1
         ? ctx.options.stallLimit
         : DEFAULT_STALL
+    // Same shape as the stall limit: a whole number of at least 1, else the default.
+    const configuredPoll =
+      typeof ctx.options.pollLimit === "number" && ctx.options.pollLimit >= 1
+        ? ctx.options.pollLimit
+        : DEFAULT_POLL
     const configuredJudge = (ctx.options.judgeModel ?? null) as ModelRef | null
     /**
      * Whether to drop the loop's reporting from the transcript. Off by default:
@@ -334,7 +340,7 @@ export default Plugin.define({
     /**
      * All four settings in one record, so the summary, the setters and the loop
      * itself cannot disagree about what is in force. `settings:<session>` holds
-     * `{ maxTurns?, stall?, quiet?, judge? }` with only the overridden keys
+     * `{ maxTurns?, stall?, poll?, quiet?, judge? }` with only the overridden keys
      * present; a key that is `null` means the plugin option applies.
      */
     const settingsKey = (sessionID: string) => `settings:${sessionID}`
@@ -342,6 +348,7 @@ export default Plugin.define({
     const configured = {
       maxTurns: configuredBudget,
       stall: configuredStall,
+      poll: configuredPoll,
       quiet: configuredQuiet,
       judge: configuredJudge,
     }
@@ -360,6 +367,7 @@ export default Plugin.define({
         // "unlimited", not an absent value. Absent keys stay undefined.
         if ("maxTurns" in stored) overrides.maxTurns = (stored.maxTurns as Budget | null) ?? null
         if (typeof stored.stall === "number") overrides.stall = stored.stall
+        if (typeof stored.poll === "number") overrides.poll = stored.poll
         if (typeof stored.quiet === "boolean") overrides.quiet = stored.quiet
         // The judge has no third value the way maxTurns does: not set is
         // exactly "use the session's model", so absent is the only unset form.
@@ -379,7 +387,9 @@ export default Plugin.define({
 
     const writeOverride = async (
       sessionID: string,
-      patch: Partial<Record<"maxTurns" | "stall" | "quiet" | "judge", Budget | number | boolean | ModelRef | null>>,
+      patch: Partial<
+        Record<"maxTurns" | "stall" | "poll" | "quiet" | "judge", Budget | number | boolean | ModelRef | null>
+      >,
     ) => {
       const stored = (await ctx.storage.get(settingsKey(sessionID))) as Record<string, unknown> | undefined
       const next: Record<string, unknown> = { ...(stored ?? {}) }
@@ -784,7 +794,7 @@ export default Plugin.define({
             return
           }
 
-          if (sub === "stall" || sub === "quiet" || sub === "judge" || sub === "settings") {
+          if (sub === "stall" || sub === "poll" || sub === "quiet" || sub === "judge" || sub === "settings") {
             if (sub === "settings") {
               const summary = renderSettings(await settingsFor(sessionID))
               if (await tuiHere(sessionID)) {
@@ -816,6 +826,28 @@ export default Plugin.define({
                 parsed.kind === "clear"
                   ? `reset to the configured default (${next})`
                   : `${next} turns with no tools`,
+              )
+              return
+            }
+            if (sub === "poll") {
+              const parsed = parseCount(argument, "poll")
+              if (parsed.kind === "invalid") {
+                await announce(
+                  sessionID,
+                  "Poll limit",
+                  "Give me a whole number of observations, or default. For example: /goal poll 5.",
+                  "error",
+                )
+                return
+              }
+              const next = parsed.kind === "clear" ? configuredPoll : parsed.value
+              await writeOverride(sessionID, { poll: parsed.kind === "clear" ? undefined : next })
+              await announce(
+                sessionID,
+                "Poll limit",
+                parsed.kind === "clear"
+                  ? `reset to the configured default (${next})`
+                  : `${next} turns with an unchanged result`,
               )
               return
             }
@@ -1021,7 +1053,7 @@ export default Plugin.define({
               `⏸ Goal paused — looping: the agent has now repeated the same reply ${repeats} turns running without acting. Judge said: ${verdict.reason}\nThis loop is not making progress. Either resume with /goal resume, or re-scope it with /goal <new text>.`,
             )
           }
-          if (observing >= 3) {
+          if (observing >= (await settingsFor(sessionID)).poll) {
             await write(sessionID, { ...looping, status: "paused" })
             return terminal(
               sessionID,

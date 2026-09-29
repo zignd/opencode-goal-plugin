@@ -1,6 +1,6 @@
 /**
- * Session settings: the turn budget, the stall limit, the quiet flag and the
- * judge model.
+ * Session settings: the turn budget, the stall limit, the polling limit, the
+ * quiet flag and the judge model.
  *
  * Each has a value in the plugin options, which is the default, and may be
  * overridden for one session with a `/goal …` subcommand. Pure functions only,
@@ -29,6 +29,7 @@ export type ModelRef = { providerID: string; id: string; variant?: string }
 export type Overrides = {
   maxTurns: Budget | undefined
   stall: number | undefined
+  poll: number | undefined
   quiet: boolean | undefined
   judge: ModelRef | undefined
 }
@@ -36,6 +37,7 @@ export type Overrides = {
 export const NO_OVERRIDES: Overrides = {
   maxTurns: undefined,
   stall: undefined,
+  poll: undefined,
   quiet: undefined,
   judge: undefined,
 }
@@ -44,15 +46,18 @@ export const NO_OVERRIDES: Overrides = {
 export type Effective = {
   maxTurns: Budget
   stall: number
+  poll: number
   quiet: boolean
   judge: ModelRef | null
-  overridden: { maxTurns: boolean; stall: boolean; quiet: boolean; judge: boolean }
+  overridden: { maxTurns: boolean; stall: boolean; poll: boolean; quiet: boolean; judge: boolean }
 }
 
 export const DEFAULT_STALL = 2
+/** The polling guard waits for three unchanged observations before it pauses. */
+export const DEFAULT_POLL = 3
 
 export function resolve(
-  options: { maxTurns: Budget; stall: number; quiet: boolean; judge: ModelRef | null },
+  options: { maxTurns: Budget; stall: number; poll: number; quiet: boolean; judge: ModelRef | null },
   overrides: Overrides,
 ): Effective {
   const pick = <T>(override: T | undefined, fallback: T): T =>
@@ -60,11 +65,13 @@ export function resolve(
   return {
     maxTurns: pick(overrides.maxTurns, options.maxTurns),
     stall: pick(overrides.stall, options.stall),
+    poll: pick(overrides.poll, options.poll),
     quiet: pick(overrides.quiet, options.quiet),
     judge: pick(overrides.judge, options.judge),
     overridden: {
       maxTurns: overrides.maxTurns !== undefined,
       stall: overrides.stall !== undefined,
+      poll: overrides.poll !== undefined,
       quiet: overrides.quiet !== undefined,
       judge: overrides.judge !== undefined,
     },
@@ -144,17 +151,19 @@ export function renderSettings(state: Effective): string {
   return [
     `Turn budget   ${budgetText}   (${mark(state.overridden.maxTurns)})`,
     `Stall limit   ${state.stall} turns with no tools   (${mark(state.overridden.stall)})`,
+    `Poll limit    ${state.poll} unchanged observations   (${mark(state.overridden.poll)})`,
     `Quiet mode    ${state.quiet ? "on" : "off"}   (${mark(state.overridden.quiet)})`,
     `Judge model   ${modelLabel(state.judge)}   (${mark(state.overridden.judge)})`,
     ``,
     `Change any of these for this session:`,
     `  /goal budget <n|unlimited|default>`,
     `  /goal stall <n|default>`,
+    `  /goal poll <n|default>`,
     `  /goal quiet <on|off|default>`,
     `  /goal judge <provider/model[#variant]|default>`,
     ``,
     `Session overrides last until this session ends. The config default is`,
-    `whatever maxTurns, stallLimit, quiet and judgeModel are set to in`,
+    `whatever maxTurns, stallLimit, pollLimit, quiet and judgeModel are set to in`,
     `opencode.json. Panel and display are TUI-only; the rest work anywhere.`,
   ].join("\n")
 }

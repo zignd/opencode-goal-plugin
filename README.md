@@ -95,6 +95,7 @@ defaults:
       "options": {
         "maxTurns": 20,
         "stallLimit": 2,
+        "pollLimit": 3,
         "judgeModel": { "providerID": "openrouter", "id": "google/gemini-3-flash-preview" }
       }
     }
@@ -106,6 +107,7 @@ defaults:
 | --- | --- | --- |
 | `maxTurns` | `20` | Automatic continuation turns before the loop auto-pauses. A whole number, or `"unlimited"` / `null` for no ceiling. The initial `/goal` turn is not counted, so `20` allows 21 agent executions in total. See below. |
 | `stallLimit` | `2` | Consecutive turns that ran **no tools** before the loop is declared stalled. |
+| `pollLimit` | `3` | Consecutive turns that re-read an unchanged result before the loop is called polling. Distinct from `stallLimit`: a polling turn *does* use tools, it just learns nothing. |
 | `judgeModel` | session model | Model used for the `done` / `continue` / `blocked` verdict. |
 | `quiet` | `false` | Stop posting the loop's turn banner and completion notices into the transcript while the panel is open. |
 
@@ -143,6 +145,7 @@ until the session ends — it never rewrites your config.
 | --- | --- | --- |
 | `/goal budget <n\|inf\|default>` | `maxTurns` | See [Removing the turn limit](#removing-the-turn-limit) |
 | `/goal stall <n\|default>` | `stallLimit` | Turns with **no tool calls** before giving up |
+| `/goal poll <n\|default>` | `pollLimit` | Turns reading the **same unchanged result** before calling it polling |
 | `/goal quiet <on\|off\|default>` | `quiet` | When on, the panel replaces the loop's transcript notices |
 | `/goal judge <provider/model[#variant]\|default>` | `judgeModel` | Cheaper and sharper models judge better and cost less |
 | `/goal settings` | — | Shows all four, and whether each is a session override or the config default |
@@ -208,6 +211,7 @@ It applies to the running goal immediately and to every goal set afterwards in t
 | The judge says `done` | the goal is met, with evidence |
 | The judge says `blocked` | the goal is unreachable, on goal-level evidence |
 | Stall guard | `stallLimit` consecutive turns with no tool calls |
+| Polling guard | `pollLimit` consecutive turns with an unchanged result |
 | Repetition guard | the same reply twice running |
 | Polling guard | 3 turns that re-read an unchanged result |
 | You | `/goal pause`, `/goal clear`, or <kbd>esc</kbd> |
@@ -392,7 +396,7 @@ The point of this plugin is that it terminates. Six conditions, checked in order
 | 2 | Judge returns `blocked` — impossible, out of scope, needs credentials or hardware you do not have | model |
 | 3 | **Stall** — `stallLimit` consecutive turns ran no tools at all, so nothing changed however confident the prose | deterministic |
 | 4 | **Repetition** — the agent produced the same reply twice running | deterministic |
-| 5 | **Polling** — 3 turns ran tools and read back the same unchanged result | deterministic |
+| 5 | **Polling** — `pollLimit` consecutive turns ran tools and read back the same unchanged result | deterministic |
 | 6 | **Budget** — `maxTurns` continuation turns spent (21 executions by default) | deterministic |
 
 Conditions 3–6 do not consult the model. This is deliberate: in testing, a weak judge model
@@ -423,9 +427,14 @@ the tool count is non-zero), while learning nothing. Only the model noticed, and
 for the terminal verdict.
 
 So the loop also digests **what the tool calls reported**, ignoring the commands that
-produced them, and pauses after three turns whose observation is unchanged. Its message says
-the work is not moving, says to wait for a running command rather than re-read it, and says
-plainly that this is not a statement about whether the goal is reachable.
+produced them, and pauses after `pollLimit` turns whose observation is unchanged. Its message
+says the work is not moving, says to wait for a running command rather than re-read it, and
+says plainly that this is not a statement about whether the goal is reachable.
+
+`pollLimit` is configurable exactly like `stallLimit` — `pollLimit` in `opencode.json`, or
+`/goal poll <n|default>` for the session — because the right threshold is a property of the
+work: a build that takes five minutes wants a higher limit than a test that takes five
+seconds, and a hardcoded 3 was the one number here a user could not argue with.
 
 It fails open: an unrecognised tool-state shape yields an empty digest and the guard stays
 quiet, because a heuristic that pauses a loop on a guess is worse than one that misses.

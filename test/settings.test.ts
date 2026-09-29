@@ -8,6 +8,7 @@
 import { describe, test } from "node:test"
 import assert from "node:assert/strict"
 import {
+  DEFAULT_POLL,
   DEFAULT_STALL,
   modelLabel,
   NO_OVERRIDES,
@@ -19,7 +20,13 @@ import {
   type Overrides,
 } from "../src/settings.ts"
 
-const OPTIONS = { maxTurns: 20 as const, stall: DEFAULT_STALL, quiet: false, judge: null }
+const OPTIONS = {
+  maxTurns: 20 as const,
+  stall: DEFAULT_STALL,
+  poll: DEFAULT_POLL,
+  quiet: false,
+  judge: null,
+}
 
 describe("parseCount", () => {
   test("reads a whole number", () => {
@@ -119,9 +126,10 @@ describe("resolve", () => {
     assert.deepEqual(resolve(OPTIONS, NO_OVERRIDES), {
       maxTurns: 20,
       stall: 2,
+      poll: DEFAULT_POLL,
       quiet: false,
       judge: null,
-      overridden: { maxTurns: false, stall: false, quiet: false, judge: false },
+      overridden: { maxTurns: false, stall: false, poll: false, quiet: false, judge: false },
     })
   })
 
@@ -132,9 +140,10 @@ describe("resolve", () => {
     assert.deepEqual(resolve(OPTIONS, { ...NO_OVERRIDES, maxTurns: null }), {
       maxTurns: null,
       stall: 2,
+      poll: DEFAULT_POLL,
       quiet: false,
       judge: null,
-      overridden: { maxTurns: true, stall: false, quiet: false, judge: false },
+      overridden: { maxTurns: true, stall: false, poll: false, quiet: false, judge: false },
     })
   })
 
@@ -143,14 +152,27 @@ describe("resolve", () => {
   })
 
   test("only the overridden settings change", () => {
-    const mixed: Overrides = { maxTurns: undefined, stall: 5, quiet: true, judge: undefined }
+    const mixed: Overrides = { maxTurns: undefined, stall: 5, poll: undefined, quiet: true, judge: undefined }
     assert.deepEqual(resolve(OPTIONS, mixed), {
       maxTurns: 20,
       stall: 5,
+      poll: DEFAULT_POLL,
       quiet: true,
       judge: null,
-      overridden: { maxTurns: false, stall: true, quiet: true, judge: false },
+      overridden: { maxTurns: false, stall: true, poll: false, quiet: true, judge: false },
     })
+  })
+
+  test("a poll override beats the configured one", () => {
+    const effective = resolve({ ...OPTIONS, poll: 3 }, { ...NO_OVERRIDES, poll: 6 })
+    assert.equal(effective.poll, 6)
+    assert.equal(effective.overridden.poll, true)
+  })
+
+  test("an absent poll override leaves the configured default alone", () => {
+    const effective = resolve({ ...OPTIONS, poll: 3 }, NO_OVERRIDES)
+    assert.equal(effective.poll, 3)
+    assert.equal(effective.overridden.poll, false)
   })
 
   test("a judge override is reported as overridden", () => {
@@ -200,6 +222,10 @@ describe("renderSettings", () => {
     assert.ok(rendered.includes("Stall limit   4 turns with no tools"), rendered)
   })
 
+  test("shows the poll limit", () => {
+    assert.ok(rendered.includes("Poll limit"), rendered)
+  })
+
   test("shows quiet as on", () => {
     assert.ok(rendered.includes("Quiet mode    on"), rendered)
   })
@@ -233,8 +259,8 @@ describe("renderSettings", () => {
   })
   // Count the parenthesised row markers, not the bare words: the closing
   // paragraph legitimately mentions both "config default" and "this session".
-  test("marks all four rows as the config default when nothing is set", () => {
-    assert.equal(untouched.match(/\(config default\)/g)?.length, 4)
+  test("marks all five rows as the config default when nothing is set", () => {
+    assert.equal(untouched.match(/\(config default\)/g)?.length, 5)
     assert.equal(untouched.match(/\(this session\)/g), null)
   })
 })
