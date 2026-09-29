@@ -30,6 +30,10 @@ export const HELP_TEXT = `/goal <text>          set the goal and start working
 /goal panel           open or close the panel        (TUI)
 /goal display         where the goal is shown        (TUI)
 /goal help            this message
+/goal budget          report the turn budget
+/goal budget 40       set a turn budget for this session
+/goal budget unlimited  no turn limit; the judge and guards are the only stops
+/goal budget default  back to the configured maxTurns
 
 Completion contract — lines the judge uses to decide "done":
   verify: / verified by:    the command or artifact that proves it
@@ -45,7 +49,8 @@ export type GoalView = {
   goal: string
   status: GoalStatus
   turns: number
-  maxTurns: number
+  /** null means no turn limit. */
+  maxTurns: number | null
   stalled: number
   repeats: number
   /** The judge's most recent one-sentence reason, or "". */
@@ -62,7 +67,7 @@ const state = {
     goal: { type: "string" },
     status: { type: "string", enum: ["active", "paused", "done", "blocked"] },
     turns: { type: "number" },
-    maxTurns: { type: "number" },
+    maxTurns: { anyOf: [{ type: "number" }, { type: "null" }] },
     stalled: { type: "number" },
     repeats: { type: "number" },
     reason: { type: "string" },

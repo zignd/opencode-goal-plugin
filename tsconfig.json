@@ -23,6 +23,8 @@
     "tui.ts",
     "tui.tsx",
     "display.ts",
-    "display.test.ts"
+    "display.test.ts",
+    "budget.ts",
+    "budget.test.ts"
   ]
 }

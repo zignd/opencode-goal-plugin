@@ -1,6 +1,15 @@
 import { realpathSync } from "node:fs"
 import { Plugin } from "@opencode/plugin"
 import { Goal, HELP_TEXT, type GoalView } from "./rpc.js"
+import {
+  budgetLabel,
+  formatTurns,
+  isExhausted,
+  parseBudgetArgument,
+  readBudgetOption,
+  UNLIMITED_CAVEAT,
+  type Budget,
+} from "./budget.js"
 // Pure, no JSX, so the server can share the parser with the TUI.
 import { parseDisplayArgument } from "./display.js"
 
@@ -55,7 +64,8 @@ type GoalState = {
   contract: Contract
   status: Status
   turns: number
-  maxTurns: number
+  /** null means no turn limit; the loop then relies on the judge and guards. */
+  maxTurns: Budget
   stalled: number
   /** Digest of the previous turn's reply, to spot a loop the judge may miss. */
   lastDigest?: string
@@ -79,7 +89,6 @@ const FIELDS: Record<string, keyof Contract> = {
   "stop when": "stopWhen",
 }
 
-const DEFAULT_MAX_TURNS = 20
 const DEFAULT_STALL_LIMIT = 2
 
 /** Where the goal can be shown. The TUI decides which are on; these are the names. */
@@ -190,7 +199,7 @@ function continuationPrompt(state: GoalState, reason: string, quiet: boolean): s
   // indistinguishable from a message the user typed.
   const banner = quiet
     ? ""
-    : `↻ [continuing toward your standing goal — turn ${state.turns}/${state.maxTurns}]\n\n`
+    : `↻ [continuing toward your standing goal — turn ${formatTurns(state.turns, state.maxTurns)}]\n\n`
   return `${banner}Goal: ${state.goal}${renderContract(state.contract)}
 
 Judge's note: ${reason}
@@ -202,7 +211,7 @@ function statusReport(state: GoalState | undefined): string {
   if (!state) return "No active goal. Set one with /goal <what you want accomplished>."
   const icon = state.status === "active" ? "⊙" : state.status === "done" ? "✓" : "⏸"
   const lines = [
-    `${icon} Goal (${state.status}) — ${state.turns}/${state.maxTurns} turns used`,
+    `${icon} Goal (${state.status}) — ${formatTurns(state.turns, state.maxTurns)} turns used`,
     `  ${state.goal}`,
   ]
   if (state.reason) lines.push(`  Last judge: ${state.reason}`)
@@ -266,7 +275,11 @@ function parseVerdict(raw: string): { verdict: Verdict; reason: string } {
 export default Plugin.define({
   id: "goal",
   async setup(ctx) {
-    const maxTurns = typeof ctx.options.maxTurns === "number" ? ctx.options.maxTurns : DEFAULT_MAX_TURNS
+    const {
+      budget: configuredBudget,
+      warning: budgetWarning,
+    } = readBudgetOption(ctx.options.maxTurns)
+    if (budgetWarning) console.warn(`[goal] ${budgetWarning}`)
     const stallLimit =
       typeof ctx.options.stallLimit === "number" ? ctx.options.stallLimit : DEFAULT_STALL_LIMIT
     const judgeOverride = ctx.options.judgeModel as ModelRef | undefined
@@ -288,6 +301,41 @@ export default Plugin.define({
 
     const read = async (sessionID: string) =>
       (await ctx.storage.get(key(sessionID))) as GoalState | undefined
+
+    /**
+     * A per-session turn budget, set by /goal budget and applied to every goal
+     * from then on. Absent means "use the plugin option", so a one-off
+     * /goal budget never silently rewrites the user's config.
+     */
+    const budgetKey = (sessionID: string) => `budget:${sessionID}`
+    /**
+     * Stored as `{ budget }` rather than the bare value, because `null` is both
+     * "unlimited" and what a missing record reads back as. Storing the bare
+     * value meant setting unlimited persisted nothing and silently reverted to
+     * the configured default.
+     */
+    const readBudgetOverride = async (
+      sessionID: string,
+    ): Promise<{ set: boolean; budget: Budget }> => {
+      const stored = (await ctx.storage.get(budgetKey(sessionID))) as
+        | { budget?: unknown }
+        | undefined
+      if (!stored || typeof stored !== "object" || !("budget" in stored)) {
+        return { set: false, budget: configuredBudget }
+      }
+      return {
+        set: true,
+        budget: typeof stored.budget === "number" ? stored.budget : null,
+      }
+    }
+    /** `undefined` clears the override, so the plugin option applies again. */
+    const writeBudgetOverride = async (sessionID: string, budget: Budget | undefined) => {
+      if (budget === undefined) await ctx.storage.remove(budgetKey(sessionID))
+      else await ctx.storage.set(budgetKey(sessionID), { budget })
+    }
+
+    const budgetForSession = async (sessionID: string): Promise<Budget> =>
+      (await readBudgetOverride(sessionID)).budget
 
     const write = async (sessionID: string, state: GoalState | undefined) => {
       if (state) await ctx.storage.set(key(sessionID), state as any)
@@ -453,7 +501,7 @@ export default Plugin.define({
       const prompt = JUDGE_PROMPT.replace("{{GOAL}}", state.goal)
         .replace("{{CONTRACT}}", renderContract(state.contract))
         .replace("{{TURN}}", String(state.turns + 1))
-        .replace("{{MAX_TURNS}}", String(state.maxTurns))
+        .replace("{{MAX_TURNS}}", budgetLabel(state.maxTurns))
         .replace("{{TOOLCALLS}}", String(toolCalls))
         .replace("{{STALLED}}", String(state.stalled ?? 0))
         .replace("{{PREVIOUS}}", state.reason || "(this is the first turn)")
@@ -475,7 +523,7 @@ export default Plugin.define({
           const sub = (head ?? "").toLowerCase()
           const argument = rest.join(" ").trim()
 
-          if (["pause", "resume", "clear", "status", "panel", "help"].includes(sub) && !argument) {
+          if (["pause", "resume", "clear", "status", "panel", "help", "budget"].includes(sub) && !argument) {
             // A subcommand is a direct question, so it always answers — even when
             // the panel is open and already showing the same thing. Going quiet
             // here reads as the command being broken.
@@ -502,6 +550,18 @@ export default Plugin.define({
               await note(sessionID, statusReport(state))
               return
             }
+            if (sub === "budget") {
+              // No argument: report. The setter lives outside this branch
+              // because it takes one.
+              const override = await readBudgetOverride(sessionID)
+              await note(
+                sessionID,
+                `Turn budget for this session: ${budgetLabel(state?.maxTurns ?? override.budget)}${
+                  override.set ? "" : " (the configured default)"
+                }`,
+              )
+              return
+            }
             if (sub === "help") {
               // Inside this block on purpose: every subcommand listed here has
               // to return before the clear fall-through at the bottom, or
@@ -525,7 +585,10 @@ export default Plugin.define({
                 return
               }
               await write(sessionID, { ...state, status: "paused", reason: "paused by the user" })
-              await note(sessionID, `⏸ Goal paused — ${state.turns}/${state.maxTurns} turns used.`)
+              await note(
+                sessionID,
+                `⏸ Goal paused — ${formatTurns(state.turns, state.maxTurns)} turns used.`,
+              )
               return
             }
             if (sub === "resume") {
@@ -566,6 +629,39 @@ export default Plugin.define({
           // no-argument branch above. Every form of it is handled here: an
           // unrecognised placement must be rejected, never fall through to the
           // goal parser and become a goal reading "display bogus off".
+          // `budget` and `display` may both carry an argument, so they live out
+          // here rather than in the no-argument branch above. Inside that branch
+          // `/goal budget 40` would skip it entirely and the goal parser would
+          // set a goal reading "budget 40".
+          if (sub === "budget") {
+            const parsed = parseBudgetArgument(argument)
+            if (parsed.kind === "invalid") {
+              await note(
+                sessionID,
+                "Give me unlimited, a whole number, or default. For example: /goal budget unlimited.",
+              )
+              return
+            }
+            const next: Budget = parsed.kind === "default" ? configuredBudget : parsed.budget
+            await writeBudgetOverride(
+              sessionID,
+              parsed.kind === "default" ? undefined : next,
+            )
+            // Apply straight away when a goal is already running, rather than
+            // waiting for the next one to be set.
+            const active = await read(sessionID)
+            if (active) await write(sessionID, { ...active, maxTurns: next })
+            await note(
+              sessionID,
+              parsed.kind === "default"
+                ? `Turn budget reset to the configured default (${budgetLabel(next)}).`
+                : next === null
+                  ? `Turn budget set to unlimited for this session.\n${UNLIMITED_CAVEAT}`
+                  : `Turn budget set to ${next} for this session.`,
+            )
+            return
+          }
+
           if (sub === "display") {
             const session = (await ctx.session.get({ sessionID })) as {
               location?: { directory?: string }
@@ -606,12 +702,13 @@ export default Plugin.define({
             return
           }
 
+          const budget = await budgetForSession(sessionID)
           const state: GoalState = {
             goal,
             contract,
             status: "active",
             turns: 0,
-            maxTurns,
+            maxTurns: budget,
             stalled: 0,
             repeats: 0,
             lastDigest: undefined,
@@ -623,7 +720,7 @@ export default Plugin.define({
             sessionID,
             text:
               `⊙ [goal set — keep working until this is done, or until it is judged unachievable, ` +
-              `judged stalled, or out of turns (max ${maxTurns})]\n\n` +
+              `judged stalled, or out of turns (max ${budgetLabel(budget)})]\n\n` +
               `Goal: ${goal}${renderContract(contract)}`,
             delivery,
           })
@@ -719,11 +816,13 @@ export default Plugin.define({
             )
           }
 
-          if (state.turns >= state.maxTurns) {
+          // The budget gate. An unlimited budget is never spent, which is what
+          // leaves the judge and the stall/repetition guards as the only stops.
+          if (isExhausted(state.turns, state.maxTurns)) {
             await write(sessionID, { ...progressed, status: "paused", stalled })
             return terminal(
               sessionID,
-              `⏸ Goal paused — ${state.maxTurns}/${state.maxTurns} turns used. Use /goal resume for another ${state.maxTurns}, or /goal clear to stop.`,
+              `⏸ Goal paused — ${formatTurns(state.maxTurns ?? 0, state.maxTurns)} turns used. Use /goal resume for another ${state.maxTurns}, or /goal clear to stop.`,
             )
           }
 

@@ -104,7 +104,7 @@ defaults:
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `maxTurns` | `20` | Automatic continuation turns before the loop auto-pauses. The initial `/goal` turn is not counted, so the default allows 21 agent executions in total. See below. |
+| `maxTurns` | `20` | Automatic continuation turns before the loop auto-pauses. A whole number, or `"unlimited"` / `null` for no ceiling. The initial `/goal` turn is not counted, so `20` allows 21 agent executions in total. See below. |
 | `stallLimit` | `2` | Consecutive turns that ran **no tools** before the loop is declared stalled. |
 | `judgeModel` | session model | Model used for the `done` / `continue` / `blocked` verdict. |
 | `quiet` | `false` | Stop posting the loop's turn banner and completion notices into the transcript while the panel is open. |
@@ -132,6 +132,34 @@ default budget looks like this:
 
 The judge is consulted once per settled turn, including the last one, so a full budget is 21
 agent executions and 21 judge calls.
+
+### Removing the turn limit
+
+The budget is the loop's hard ceiling on cost and wall-clock time. You can lift it per session:
+
+```text
+/goal budget unlimited   no turn limit
+/goal budget 60          a specific limit
+/goal budget default     back to the configured maxTurns
+/goal budget             report the current one
+```
+
+It applies to the running goal immediately and to every goal set afterwards in that session.
+`maxTurns: "unlimited"` in the plugin options does the same thing as the default.
+
+**What you give up.** With no ceiling, the only things that stop the loop are:
+
+| Still stops it | |
+| --- | --- |
+| The judge says `done` | the goal is met, with evidence |
+| The judge says `blocked` | the goal is unreachable, or the agent is going in circles |
+| Stall guard | `stallLimit` consecutive turns with no tool calls |
+| Repetition guard | the same reply twice running |
+| You | `/goal pause`, `/goal clear`, or <kbd>esc</kbd> |
+
+So an agent that keeps making small, genuine-looking progress can now run indefinitely. Nothing
+caps total spend. If you want a middle ground, `/goal budget 500` gives most of the headroom
+with a real ceiling. The panel shows `turn 7/∞` and says so explicitly while unlimited.
 
 You can watch the counter in the transcript:
 
@@ -162,6 +190,10 @@ drives that session's loop.
 | `/goal panel` | Open or close the panel. TUI only; elsewhere it says so. Works whether the panel is open or closed. |
 | `/goal display` | Choose where the goal is shown. TUI only. |
 | `/goal help` | The full command reference, in a dialog. |
+| `/goal budget` | Report this session's turn budget. |
+| `/goal budget <n>` | Set a turn budget for this session, applied at once if a goal is running. |
+| `/goal budget unlimited` | No turn limit. |
+| `/goal budget default` | Back to the configured `maxTurns`. |
 
 ### The session panel (TUI)
 
@@ -326,6 +358,8 @@ OpenCode's V2 plugin API; no code was copied from either project.
 | `tui.tsx` | TUI | The panel, the summary lines, the toasts and dialogs. JSX needs the `.tsx` extension. |
 | `display.ts` | TUI | Which placements are on, as pure functions. |
 | `display.test.ts` | TUI | Checks for the above. Plain node, no test framework. |
+| `budget.ts` | server | Turn budget parsing, display and the exhaustion test, as pure functions. |
+| `budget.test.ts` | server | Checks for the above. |
 
 ## Development
 
@@ -335,6 +369,7 @@ cd opencode-goal-plugin
 npm install
 npx tsc -p tsconfig.json
 node display.test.ts
+node budget.test.ts
 ```
 
 Bumping support for a new OpenCode release means bumping `@opencode/plugin` and re-running the

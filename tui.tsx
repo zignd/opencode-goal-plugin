@@ -1,6 +1,7 @@
 import { Plugin } from "@opencode/plugin/tui"
 import { createEffect, createSignal, onCleanup, Show } from "solid-js"
 import { Goal, HELP_TEXT as HELP, type GoalView } from "./rpc.js"
+import { formatTurns } from "./budget.js"
 import {
   applyAll,
   applyParsed,
@@ -215,7 +216,7 @@ export default Plugin.define({
           {(current) => (
             <text fg={colour(current().status)}>
               ● goal {word(current().status)}
-              {current().status === "active" ? ` · turn ${current().turns}/${current().maxTurns}` : ""}
+              {current().status === "active" ? ` · turn ${formatTurns(current().turns, current().maxTurns)}` : ""}
             </text>
           )}
         </Show>
@@ -298,11 +299,15 @@ export default Plugin.define({
             return { label: "paused", colour: palette.warning }
         }
       }
+      const unlimited = () => props.view.maxTurns === null
+      // A bar needs a ceiling to fill towards, so an unlimited goal gets the
+      // turn count alone rather than a meaningless full bar.
       const bar = () => {
         const width = Math.max(8, Math.min(28, (props.width ?? 44) - 16))
-        const ratio = props.view.maxTurns > 0 ? props.view.turns / props.view.maxTurns : 0
-        const filled = Math.min(width, Math.round(ratio * width))
-        return "█".repeat(filled) + "░".repeat(width - filled)
+        const max = props.view.maxTurns
+        if (max === null) return ""
+        const filled = Math.min(width, Math.round((props.view.turns / max) * width))
+        return "█".repeat(filled) + "░".repeat(width - filled) + " "
       }
       // `turns` counts continuations, so the opening turn is not in it. Adding
       // one keeps "0 turns" from reading as "nothing happened" on a goal that
@@ -318,14 +323,24 @@ export default Plugin.define({
           <Show
             when={props.view.status === "active"}
             fallback={
-              <text fg={palette.muted}>
-                finished after {turnsUsed} of {props.view.maxTurns} turns
-              </text>
+              <Show
+                when={unlimited()}
+                fallback={
+                  <text fg={palette.muted}>
+                    finished after {turnsUsed} of {props.view.maxTurns} turns
+                  </text>
+                }
+              >
+                <text fg={palette.muted}>finished after {turnsUsed} turns, no limit set</text>
+              </Show>
             }
           >
             <text fg={palette.muted}>
-              {bar()} turn {props.view.turns}/{props.view.maxTurns}
+              {bar()}turn {formatTurns(props.view.turns, props.view.maxTurns)}
             </text>
+            <Show when={unlimited()}>
+              <text fg={palette.warning}>no turn limit — the judge and guards are the only stops</text>
+            </Show>
           </Show>
           <Show when={props.view.stalled > 0}>
             <text fg={palette.warning}>stalled: {props.view.stalled} turns with no tools</text>
