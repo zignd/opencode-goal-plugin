@@ -1,6 +1,6 @@
 import { realpathSync } from "node:fs"
 import { Plugin } from "@opencode/plugin"
-import { Goal, type GoalView } from "./rpc.js"
+import { Goal, HELP_TEXT, type GoalView } from "./rpc.js"
 
 /**
  * Persistent goals, modelled on the Ralph loop.
@@ -463,7 +463,9 @@ export default Plugin.define({
     const command = await ctx.command.transform((editor) => {
       editor.add({
         name: "goal",
-        description: "Set a standing goal and keep working until it is done, blocked, or out of turns",
+        description:
+          "Set a standing goal and keep working until it is done, blocked, stalled, or out of turns. " +
+          "Subcommands: status, pause, resume, clear, panel, display, help",
         execute: async ({ sessionID, prompt, delivery }) => {
           // `prompt.text` may or may not still carry the "/goal" prefix.
           const raw = prompt.text.replace(/^\s*\/goal\b/i, "").trim()
@@ -471,7 +473,7 @@ export default Plugin.define({
           const sub = (head ?? "").toLowerCase()
           const argument = rest.join(" ").trim()
 
-          if (["pause", "resume", "clear", "status", "panel"].includes(sub) && !argument) {
+          if (["pause", "resume", "clear", "status", "panel", "help"].includes(sub) && !argument) {
             // A subcommand is a direct question, so it always answers — even when
             // the panel is open and already showing the same thing. Going quiet
             // here reads as the command being broken.
@@ -496,6 +498,23 @@ export default Plugin.define({
             }
             if (sub === "status") {
               await note(sessionID, statusReport(state))
+              return
+            }
+            if (sub === "help") {
+              // Inside this block on purpose: every subcommand listed here has
+              // to return before the clear fall-through at the bottom, or
+              // `/goal help` silently drops the goal on the floor.
+              const session = (await ctx.session.get({ sessionID })) as {
+                location?: { directory?: string }
+              }
+              const directory = session?.location?.directory
+              if (!(directory && (await isTuiPresent(directory)))) {
+                await note(sessionID, HELP_TEXT)
+                return
+              }
+              try {
+                await rpc.events.emit("help", {})
+              } catch {}
               return
             }
             if (sub === "pause") {

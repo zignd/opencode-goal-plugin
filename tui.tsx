@@ -1,6 +1,6 @@
 import { Plugin } from "@opencode/plugin/tui"
 import { createEffect, createSignal, onCleanup, Show } from "solid-js"
-import { Goal, type GoalView } from "./rpc.js"
+import { Goal, HELP_TEXT as HELP, type GoalView } from "./rpc.js"
 
 /**
  * The TUI half of the goal plugin.
@@ -382,32 +382,83 @@ export default Plugin.define({
       }),
     )
 
+    guard("help request", () =>
+      rpc.events.on("help", async (event) => {
+        if (!isLocal(event.location?.directory)) return
+        try {
+          context.ui.dialog.set({ size: "large", centered: true })
+          await context.ui.dialog.alert({ title: "/goal", message: HELP })
+        } catch {
+          // No dialog available.
+        }
+      }),
+    )
+
     guard("display request", () =>
       rpc.events.on("display", async (event) => {
         if (!isLocal(event.location?.directory)) return
         const { placement, enabled } = event.data as { placement?: string; enabled?: boolean }
-        try {
-          if (placement && (PLACEMENTS as readonly string[]).includes(placement)) {
-            const next = enabled ?? !display[placement as Placement]
+        const known = (key: string) => (PLACEMENTS as readonly string[]).includes(key)
+
+        // No placement: a settings query deserves a list you can act on, not a
+        // toast that vanishes before it is read.
+        if (!placement) {
+          try {
+            const choice = await context.ui.dialog.select<"__off" | Placement>({
+              title: "Where should the goal be shown?",
+              options: [
+                ...PLACEMENTS.map((key) => ({
+                  title: `${display[key] ? "on " : "off"}  ${key}`,
+                  value: key as Placement,
+                  description: key === "panel" ? "full view, right side" : "one-line summary",
+                })),
+                {
+                  title: "hide everywhere",
+                  value: "__off" as const,
+                  description: "only the transcript shows the goal",
+                },
+              ],
+            })
+            if (choice === undefined) return
+            const next =
+              choice === "__off"
+                ? Object.fromEntries(PLACEMENTS.map((key) => [key, false]))
+                : { [choice]: !display[choice] }
             await setDisplay((draft) => {
-              draft[placement as Placement] = next
+              for (const key of PLACEMENTS) draft[key] = next[key] ?? false
             })
             context.ui.toast.show({
-              title: next ? "Goal shown" : "Goal hidden",
-              message: `${placement}`,
+              title: "Goal display",
+              message:
+                choice === "__off"
+                  ? "hidden everywhere"
+                  : `${choice} ${next[choice] ? "on" : "off"}`,
               duration: 3000,
             })
             return
+          } catch {
+            // Fall through to the summary toast.
           }
-          // No placement given: show where it currently is.
-          const on = PLACEMENTS.filter((key) => display[key]).join(", ")
+        }
+
+        if (placement && known(placement)) {
+          const next = enabled ?? !display[placement as Placement]
+          await setDisplay((draft) => {
+            draft[placement as Placement] = next
+          })
           context.ui.toast.show({
-            title: "Goal display",
-            message: on ? `shown in: ${on}` : "hidden everywhere",
+            title: next ? "Goal shown" : "Goal hidden",
+            message: placement,
+            duration: 3000,
+          })
+          return
+        }
+        if (placement) {
+          context.ui.toast.show({
+            title: "Unknown display",
+            message: `Choose from: ${PLACEMENTS.join(", ")}`,
             duration: 5000,
           })
-        } catch {
-          // Nothing to report.
         }
       }),
     )

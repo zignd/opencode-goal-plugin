@@ -16,6 +16,30 @@ import { Rpc } from "@opencode/plugin/rpc"
 
 export type GoalStatus = "active" | "paused" | "done" | "blocked"
 
+/**
+ * The command reference, defined here because this is the only module both
+ * halves import. It lives in rpc.ts rather than index.ts on purpose: index.ts is
+ * the server plugin, and importing it from the TUI would evaluate a whole
+ * second plugin in the client process.
+ */
+export const HELP_TEXT = `/goal <text>          set the goal and start working
+/goal status          report the goal, its state, turns used, last judge reason
+/goal pause           stop auto-continuation, keep the goal
+/goal resume          resume with a fresh turn budget
+/goal clear           drop the goal
+/goal panel           open or close the panel        (TUI)
+/goal display         where the goal is shown        (TUI)
+/goal help            this message
+
+Completion contract — lines the judge uses to decide "done":
+  verify: / verified by:    the command or artifact that proves it
+  constraints: / preserve:  what must not change
+  scope: / boundaries:      what is in scope
+  outcome:                  the end state that must be true
+  stop when:                when to stop and ask you
+
+The loop stops on: done, judged unachievable, stalled, repeated, or out of turns.`
+
 export type GoalView = {
   sessionID: string
   goal: string
@@ -137,5 +161,11 @@ export const Goal = Rpc.define({
         additionalProperties: false,
       },
     },
+    /**
+     * `/goal help`. The subcommand list is far too long for a command
+     * description and belongs in a dialog the user can read and dismiss, not in
+     * the transcript where it would cost a model call.
+     */
+    help: { schema: empty },
   },
 })

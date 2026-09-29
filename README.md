@@ -160,6 +160,8 @@ drives that session's loop.
 | `/goal resume` | Resume the loop with a fresh turn budget. |
 | `/goal clear` | Drop the goal entirely. |
 | `/goal panel` | Open or close the panel. TUI only; elsewhere it says so. Works whether the panel is open or closed. |
+| `/goal display` | Choose where the goal is shown. TUI only. |
+| `/goal help` | The full command reference, in a dialog. |
 
 ### The session panel (TUI)
 
