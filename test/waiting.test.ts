@@ -73,6 +73,25 @@ describe("waitForBackground", () => {
     assert.equal(out.waitedMs, 20_000)
   })
 
+  test("does not trust an early empty reading when nothing was ever seen pending", async () => {
+    let calls = 0
+    const c = clock()
+    const out = await waitForBackground({
+      ...base,
+      ...c,
+      graceMs: 8000,
+      intervalMs: 2000,
+      pending: async () => (++calls < 3 ? 0 : 1),
+    })
+    assert.equal(out.end, "timeout")
+  })
+
+  test("after the grace period an empty reading means finished", async () => {
+    const out = await waitForBackground({ ...base, ...clock(), graceMs: 8000, intervalMs: 2000, pending: async () => 0 })
+    assert.equal(out.end, "finished")
+    assert.equal(out.waitedMs, 8000)
+  })
+
   test("stops at the time limit while work is still pending", async () => {
     const out = await waitForBackground({ ...base, ...clock(), pending: async () => 1 })
     assert.equal(out.end, "timeout")

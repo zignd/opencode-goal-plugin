@@ -696,6 +696,7 @@ export default Plugin.define({
           const { end, waitedMs } = await waitForBackground({
             seconds,
             intervalMs: 5000,
+            graceMs: 8000,
             signal: context.signal,
             // The completion notice is only delivered once the turn ends, so inside a
             // turn it never shows in the context. Whether the process still holds its

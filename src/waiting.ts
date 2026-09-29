@@ -68,16 +68,25 @@ export async function waitForBackground(options: {
   signal?: AbortSignal
   sleep?: (ms: number) => Promise<void>
   now?: () => number
+  /**
+   * How long "nothing pending" is distrusted when nothing has ever been seen pending. A command
+   * launched in the same parallel block as this call is not in the context yet, so an early
+   * empty reading is a race, not an answer.
+   */
+  graceMs?: number
 }): Promise<{ end: WaitEnd; waitedMs: number }> {
   const sleep = options.sleep ?? ((ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
   const now = options.now ?? Date.now
   const started = now()
   const deadline = started + options.seconds * 1000
   const result = (end: WaitEnd) => ({ end, waitedMs: now() - started })
+  const grace = options.graceMs ?? 0
+  let seen = false
   for (;;) {
     if (options.signal?.aborted) return result("aborted")
     if (!(await options.active())) return result("inactive")
-    if ((await options.pending()) === 0) return result("finished")
+    if ((await options.pending()) > 0) seen = true
+    else if (seen || now() - started >= grace) return result("finished")
     const left = deadline - now()
     if (left <= 0) return result("timeout")
     await sleep(Math.min(options.intervalMs, left))
