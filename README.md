@@ -141,7 +141,7 @@ until the session ends — it never rewrites your config.
 
 | Subcommand | Option | Notes |
 | --- | --- | --- |
-| `/goal budget <n\|unlimited\|default>` | `maxTurns` | See [Removing the turn limit](#removing-the-turn-limit) |
+| `/goal budget <n\|inf\|default>` | `maxTurns` | See [Removing the turn limit](#removing-the-turn-limit) |
 | `/goal stall <n\|default>` | `stallLimit` | Turns with **no tool calls** before giving up |
 | `/goal quiet <on\|off\|default>` | `quiet` | When on, the panel replaces the loop's transcript notices |
 | `/goal judge <provider/model[#variant]\|default>` | `judgeModel` | Cheaper and sharper models judge better and cost less |
@@ -189,11 +189,14 @@ has one.
 The budget is the loop's hard ceiling on cost and wall-clock time. You can lift it per session:
 
 ```text
-/goal budget unlimited   no turn limit
+/goal budget inf         no turn limit
 /goal budget 60          a specific limit
 /goal budget default     back to the configured maxTurns
 /goal budget             report the current one
 ```
+
+`inf` is the short spelling. `unlim`, `unlimited`, `unbounded`, `infinite`, `inf.`, `none`,
+`no-limit` and `∞` all work too.
 
 It applies to the running goal immediately and to every goal set afterwards in that session.
 `maxTurns: "unlimited"` in the plugin options does the same thing as the default.

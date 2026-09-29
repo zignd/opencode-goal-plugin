@@ -88,7 +88,7 @@ check("with nothing set, options win", resolve(options, NO_OVERRIDES), {
   judge: null,
   overridden: { maxTurns: false, stall: false, quiet: false, judge: false },
 })
-const mixed: Overrides = { maxTurns: null, stall: 5, quiet: true, judge: null }
+const mixed: Overrides = { maxTurns: undefined, stall: 5, quiet: true, judge: undefined }
 check("only what is overridden changes", resolve(options, mixed), {
   maxTurns: 20,
   stall: 5,
@@ -97,10 +97,18 @@ check("only what is overridden changes", resolve(options, mixed), {
   overridden: { maxTurns: false, stall: true, quiet: true, judge: false },
 })
 const all: Overrides = { maxTurns: null, stall: 1, quiet: true, judge: { providerID: "a", id: "b" } }
-check("an unlimited override survives as null-valued maxTurns", resolve({ ...options, maxTurns: 20 }, {
-  ...all,
+// The regression this file exists for: an explicit "unlimited" must beat the
+// configured default. When absent and unlimited were both spelled null, setting
+// unlimited looked like it had done nothing.
+check("an explicit unlimited override beats the default", resolve(options, { ...NO_OVERRIDES, maxTurns: null }), {
   maxTurns: null,
-}).overridden.maxTurns, false)
+  stall: 2,
+  quiet: false,
+  judge: null,
+  overridden: { maxTurns: true, stall: false, quiet: false, judge: false },
+})
+check("an explicit unlimited override is reported as overridden", resolve(options, { ...NO_OVERRIDES, maxTurns: null }).overridden.maxTurns, true)
+check("an absent override leaves the default alone", resolve(options, NO_OVERRIDES).maxTurns, 20)
 check("a judge override is reported as overridden", resolve(options, { ...NO_OVERRIDES, judge: { providerID: "a", id: "b" } }).overridden.judge, true)
 
 console.log("modelLabel")

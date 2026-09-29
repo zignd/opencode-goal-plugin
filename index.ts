@@ -8,6 +8,7 @@ import {
   parseBudgetArgument,
   readBudgetOption,
   UNLIMITED_CAVEAT,
+  UNLIMITED_HINT,
   type Budget,
 } from "./budget.js"
 import {
@@ -344,12 +345,18 @@ export default Plugin.define({
         | undefined
       const overrides: Overrides = { ...NO_OVERRIDES }
       if (stored && typeof stored === "object") {
-        if ("maxTurns" in stored) overrides.maxTurns = (stored.maxTurns as number | null) ?? null
+        // A present key means the user set it, so a stored null is an explicit
+        // "unlimited", not an absent value. Absent keys stay undefined.
+        if ("maxTurns" in stored) overrides.maxTurns = (stored.maxTurns as Budget | null) ?? null
         if (typeof stored.stall === "number") overrides.stall = stored.stall
         if (typeof stored.quiet === "boolean") overrides.quiet = stored.quiet
-        if ("judge" in stored) overrides.judge = (stored.judge as ModelRef | null) ?? null
+        // The judge has no third value the way maxTurns does: not set is
+        // exactly "use the session's model", so absent is the only unset form.
+        if (typeof stored.judge === "object" && stored.judge !== null) {
+          overrides.judge = stored.judge as ModelRef
+        }
       }
-      if (overrides.maxTurns === null) {
+      if (overrides.maxTurns === undefined) {
         // Migrate the old single-value record if one is lying around.
         const legacy = (await ctx.storage.get(`budget:${sessionID}`)) as { budget?: unknown } | undefined
         if (legacy && typeof legacy === "object" && "budget" in legacy) {
@@ -736,7 +743,7 @@ export default Plugin.define({
               await announce(
                 sessionID,
                 "Turn budget",
-                "Give me unlimited, a whole number, or default. For example: /goal budget unlimited.",
+                `Give me ${UNLIMITED_HINT}, a whole number, or default. For example: /goal budget inf.`,
                 "error",
               )
               return
@@ -833,7 +840,9 @@ export default Plugin.define({
               return
             }
             const next = parsed.kind === "clear" ? configuredJudge : parsed.value
-            await writeOverride(sessionID, { judge: parsed.kind === "clear" ? undefined : next })
+            await writeOverride(sessionID, {
+              judge: parsed.kind === "clear" || next === null ? undefined : next,
+            })
             await announce(
               sessionID,
               "Judge model",

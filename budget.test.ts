@@ -11,6 +11,7 @@ import {
   isExhausted,
   parseBudgetArgument,
   readBudgetOption,
+  UNLIMITED_HINT,
   UNLIMITED_CAVEAT,
   type Budget,
 } from "./budget.ts"
@@ -43,6 +44,11 @@ check("unlimited", parseBudgetArgument("unlimited"), { kind: "budget", budget: n
 check("Unlimited with odd casing", parseBudgetArgument("  UNLIMITED "), { kind: "budget", budget: null })
 check("infinite", parseBudgetArgument("infinite"), { kind: "budget", budget: null })
 check("none", parseBudgetArgument("none"), { kind: "budget", budget: null })
+check("inf is a short alias", parseBudgetArgument("inf"), { kind: "budget", budget: null })
+check("unlim is a short alias", parseBudgetArgument("unlim"), { kind: "budget", budget: null })
+check("the infinity sign is an alias", parseBudgetArgument("\u221e"), { kind: "budget", budget: null })
+check("infinity sign with padding", parseBudgetArgument(" \u221e "), { kind: "budget", budget: null })
+check("unlim is not read as a count", parseBudgetArgument("unlim").kind, "budget")
 check("a count", parseBudgetArgument("40"), { kind: "budget", budget: 40 })
 check("default", parseBudgetArgument("default"), { kind: "default" })
 check("zero is not a budget", parseBudgetArgument("0"), { kind: "invalid", value: "0" })
@@ -75,6 +81,7 @@ check("counter at zero when unlimited", formatTurns(0, null), "0/∞")
 
 console.log("misc")
 check("the caveat names what still stops it", /judge|stall|repeat/i.test(UNLIMITED_CAVEAT), true)
+check("the hint advertises a short alias", /\binf\b/.test(UNLIMITED_HINT), true)
 check("the caveat mentions no ceiling", /ceiling/i.test(UNLIMITED_CAVEAT), true)
 
 console.log(failures === 0 ? "\nall passed" : `\n${failures} FAILED`)

@@ -18,19 +18,26 @@ import type { Budget } from "./budget.js"
 
 export type ModelRef = { providerID: string; id: string; variant?: string }
 
-/** Per-session overrides. `null` means "not overridden, use the option". */
+/**
+ * Per-session overrides.
+ *
+ * `undefined` means "not overridden, use the option". For `maxTurns` the
+ * override may also be `null`, which means unlimited - so the two must stay
+ * distinct. Using `null` for both made an explicit "unlimited" read back as
+ * "not set", and the configured default silently won.
+ */
 export type Overrides = {
-  maxTurns: Budget | null
-  stall: number | null
-  quiet: boolean | null
-  judge: ModelRef | null
+  maxTurns: Budget | undefined
+  stall: number | undefined
+  quiet: boolean | undefined
+  judge: ModelRef | undefined
 }
 
 export const NO_OVERRIDES: Overrides = {
-  maxTurns: null,
-  stall: null,
-  quiet: null,
-  judge: null,
+  maxTurns: undefined,
+  stall: undefined,
+  quiet: undefined,
+  judge: undefined,
 }
 
 /** What the loop actually uses, after options and overrides are merged. */
@@ -48,17 +55,18 @@ export function resolve(
   options: { maxTurns: Budget; stall: number; quiet: boolean; judge: ModelRef | null },
   overrides: Overrides,
 ): Effective {
-  const pick = <T>(override: T | null, fallback: T): T => (override === null ? fallback : override)
+  const pick = <T>(override: T | undefined, fallback: T): T =>
+    override === undefined ? fallback : override
   return {
     maxTurns: pick(overrides.maxTurns, options.maxTurns),
     stall: pick(overrides.stall, options.stall),
     quiet: pick(overrides.quiet, options.quiet),
     judge: pick(overrides.judge, options.judge),
     overridden: {
-      maxTurns: overrides.maxTurns !== null,
-      stall: overrides.stall !== null,
-      quiet: overrides.quiet !== null,
-      judge: overrides.judge !== null,
+      maxTurns: overrides.maxTurns !== undefined,
+      stall: overrides.stall !== undefined,
+      quiet: overrides.quiet !== undefined,
+      judge: overrides.judge !== undefined,
     },
   }
 }

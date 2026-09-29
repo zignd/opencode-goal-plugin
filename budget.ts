@@ -15,15 +15,26 @@ export type Budget = number | null
 
 export const DEFAULT_BUDGET = 20
 
+/**
+ * Spellings of "unlimited". `inf` and `unlim` exist because typing
+ * "unlimited" nine times a session is a chore; they are the short forms the
+ * README and the error message advertise.
+ */
 const UNLIMITED_WORDS = new Set([
   "unlimited",
+  "unlim",
   "unbounded",
   "infinite",
   "inf",
+  "inf.",
+  "∞",
   "none",
   "no-limit",
   "nolimit",
 ])
+
+/** What to suggest when someone types something unusable. */
+export const UNLIMITED_HINT = "unlimited (or: inf, unlim, ∞, none)"
 
 /** Render a budget for humans: a count, or the word. */
 export function budgetLabel(budget: Budget): string {
