@@ -147,6 +147,30 @@ until the session ends — it never rewrites your config.
 | `/goal judge <provider/model[#variant]\|default>` | `judgeModel` | Cheaper and sharper models judge better and cost less |
 | `/goal settings` | — | Shows all four, and whether each is a session override or the config default |
 
+### What a subcommand reply costs
+
+A synthetic session message is a real prompt: it starts an execution and costs a model call, and
+the agent then repeats the confirmation back at you. For a one-line "stall limit is now 5" that
+is pure waste.
+
+So the settings subcommands answer through the TUI as a toast when one is attached, and fall back
+to the transcript only when there is no TUI to show it — desktop, the web client,
+`opencode run`. `/goal settings` uses a dialog the same way, and `/goal panel` and
+`/goal display` already worked this way.
+
+| Subcommand | Reply |
+| --- | --- |
+| `/goal stall`, `/goal quiet`, `/goal judge`, `/goal budget <n>` | toast, no model call |
+| `/goal settings` | dialog, no model call |
+| `/goal panel`, `/goal display` | toast, no model call |
+| `/goal status`, `/goal pause`, `/goal resume`, `/goal clear` | in the transcript, a model call each |
+
+The last row is deliberate. Those are direct answers to something you typed, and `/goal status`
+returning nothing is exactly the bug this table's siblings were built to avoid — a silent command
+reads as a broken one. They also print more than fits in a toast. Set `quiet: true` if the
+transcript notices are the part you want gone, though that covers the loop's own reporting rather
+than these replies.
+
 `/goal settings` opens a dialog in the TUI and prints to the transcript elsewhere:
 
 ```text

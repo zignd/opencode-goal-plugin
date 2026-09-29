@@ -178,6 +178,24 @@ export const Goal = Rpc.define({
      */
     help: { schema: empty },
     /**
+     * A short confirmation or complaint for a subcommand the user just ran.
+     * Answering these in the transcript would mean a synthetic message, which is
+     * a real prompt and costs a model call, so a TUI shows them as a toast
+     * instead. Without a TUI the server falls back to posting the message.
+     */
+    notice: {
+      schema: {
+        type: "object",
+        properties: {
+          title: { type: "string" },
+          message: { type: "string" },
+          variant: { type: "string", enum: ["success", "warning", "error"] },
+        },
+        required: ["title", "message"],
+        additionalProperties: false,
+      },
+    },
+    /**
      * `/goal settings`. The server renders the summary, because it is the side
      * that knows the values, and the TUI only displays it in a dialog.
      */

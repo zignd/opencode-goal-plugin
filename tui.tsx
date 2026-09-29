@@ -436,6 +436,19 @@ export default Plugin.define({
       })
     }
 
+    guard("notice request", () =>
+      rpc.events.on("notice", (event) => {
+        if (!isLocal(event.location?.directory)) return
+        const { title, message, variant } = event.data as {
+          title?: string
+          message?: string
+          variant?: "success" | "warning" | "error"
+        }
+        if (!title || !message) return
+        context.ui.toast.show({ title, message, ...(variant ? { variant } : {}), duration: 4000 })
+      }),
+    )
+
     guard("settings request", () =>
       rpc.events.on("settings", async (event) => {
         if (!isLocal(event.location?.directory)) return

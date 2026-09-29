@@ -410,6 +410,36 @@ export default Plugin.define({
       return Boolean(directory) && (await isTuiPresent(directory!))
     }
 
+    /**
+     * Reply to a subcommand the user just ran.
+     *
+     * A synthetic session message is a real prompt: it starts an execution and
+     * costs a model call, and the agent then dutifully repeats the confirmation
+     * back. For a one-line "stall limit is now 5" that is pure waste, so a TUI
+     * is asked to raise a toast instead. Only a client with no TUI — desktop,
+     * web, `opencode run` — falls back to the transcript, because then it is
+     * the only channel there is.
+     */
+    const announce = async (
+      sessionID: string,
+      title: string,
+      message: string,
+      variant?: "success" | "warning" | "error",
+      /** Extra prose for the transcript only. A toast disappears, so anything
+       *  longer than a line belongs here rather than in `message`. */
+      detail?: string,
+    ) => {
+      if (await tuiHere(sessionID)) {
+        try {
+          await rpc.events.emit("notice", { title, message, ...(variant ? { variant } : {}) })
+          return
+        } catch {
+          // Fall through to the transcript rather than say nothing.
+        }
+      }
+      await note(sessionID, `${title} — ${message}${detail ? `\n\n${detail}` : ""}`)
+    }
+
     const write = async (sessionID: string, state: GoalState | undefined) => {
       if (state) await ctx.storage.set(key(sessionID), state as any)
       else await ctx.storage.remove(key(sessionID))
@@ -626,9 +656,10 @@ export default Plugin.define({
               // No argument: report. The setter lives outside this branch
               // because it takes one.
               const current = await settingsFor(sessionID)
-              await note(
+              await announce(
                 sessionID,
-                `Turn budget for this session: ${budgetLabel(state?.maxTurns ?? current.maxTurns)}`,
+                "Turn budget",
+                budgetLabel(state?.maxTurns ?? current.maxTurns),
               )
               return
             }
@@ -702,9 +733,11 @@ export default Plugin.define({
           if (sub === "budget") {
             const parsed = parseBudgetArgument(argument)
             if (parsed.kind === "invalid") {
-              await note(
+              await announce(
                 sessionID,
+                "Turn budget",
                 "Give me unlimited, a whole number, or default. For example: /goal budget unlimited.",
+                "error",
               )
               return
             }
@@ -715,13 +748,17 @@ export default Plugin.define({
             // Apply straight away when a goal is already running, rather than
             // waiting for the next one to be set.
             await applyLiveBudget(sessionID, next)
-            await note(
+            await announce(
               sessionID,
+              "Turn budget",
               parsed.kind === "default"
-                ? `Turn budget reset to the configured default (${budgetLabel(next)}).`
+                ? `reset to the configured default (${budgetLabel(next)})`
                 : next === null
-                  ? `Turn budget set to unlimited for this session.\n${UNLIMITED_CAVEAT}`
-                  : `Turn budget set to ${next} for this session.`,
+                  ? // The caveat is a paragraph, which does not belong in a
+                    // toast that disappears. /goal help and the README carry it.
+                    "unlimited — the judge and the stall and repetition guards are the only stops"
+                  : `${next} for this session`,
+              next === null ? "warning" : undefined,
             )
             return
           }
@@ -742,50 +779,67 @@ export default Plugin.define({
             if (sub === "stall") {
               const parsed = parseCount(argument, "stall")
               if (parsed.kind === "invalid") {
-                await note(sessionID, "Give me a whole number of turns, or default. For example: /goal stall 4.")
+                await announce(
+                  sessionID,
+                  "Stall limit",
+                  "Give me a whole number of turns, or default. For example: /goal stall 4.",
+                  "error",
+                )
                 return
               }
               const next = parsed.kind === "clear" ? configuredStall : parsed.value
               await writeOverride(sessionID, { stall: parsed.kind === "clear" ? undefined : next })
-              await note(
+              await announce(
                 sessionID,
+                "Stall limit",
                 parsed.kind === "clear"
-                  ? `Stall limit reset to the configured default (${next}).`
-                  : `Stall limit set to ${next} turns with no tools.`,
+                  ? `reset to the configured default (${next})`
+                  : `${next} turns with no tools`,
               )
               return
             }
             if (sub === "quiet") {
               const parsed = parseFlag(argument)
               if (parsed.kind === "invalid") {
-                await note(sessionID, "Give me on, off, or default. For example: /goal quiet off.")
+                await announce(
+                  sessionID,
+                  "Quiet mode",
+                  "Give me on, off, or default. For example: /goal quiet off.",
+                  "error",
+                )
                 return
               }
               const next = parsed.kind === "clear" ? configuredQuiet : parsed.value
               await writeOverride(sessionID, { quiet: parsed.kind === "clear" ? undefined : next })
-              await note(
+              await announce(
                 sessionID,
+                "Quiet mode",
                 parsed.kind === "clear"
-                  ? `Quiet mode reset to the configured default (${next ? "on" : "off"}).`
-                  : `Quiet mode ${next ? "on" : "off"} — ${next ? "the panel replaces the loop's transcript notices" : "the loop writes its turn banner and completion notices as well as showing the panel"}.`,
+                  ? `reset to the configured default (${next ? "on" : "off"})`
+                  : next
+                    ? "on — the panel replaces the loop's transcript notices"
+                    : "off — the loop writes its turn notices as well as showing the panel",
               )
               return
             }
             const parsed = parseModel(argument)
             if (parsed.kind === "invalid") {
-              await note(
+              await announce(
                 sessionID,
+                "Judge model",
                 "Give me provider/model, optionally #variant, or default. For example: /goal judge openrouter/google/gemini-3-flash-preview.",
+                "error",
               )
               return
             }
             const next = parsed.kind === "clear" ? configuredJudge : parsed.value
             await writeOverride(sessionID, { judge: parsed.kind === "clear" ? undefined : next })
-            await note(
+            await announce(
               sessionID,
+              "Judge model",
               parsed.kind === "clear"
-                ? `Judge model reset to the configured default (${modelLabel(next)}).`
-                : `Judge model set to ${modelLabel(next)}.`,
+                ? `reset to the configured default (${modelLabel(next)})`
+                : modelLabel(next),
             )
             return
           }
