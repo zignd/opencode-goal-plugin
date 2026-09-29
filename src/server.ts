@@ -2,6 +2,7 @@ import { realpathSync } from "node:fs"
 import { Plugin } from "@opencode/plugin"
 import { Goal, HELP_TEXT, type GoalView } from "./rpc.js"
 import { observationOf } from "./observation.js"
+import { backoffSeconds, MAX_WAIT_MS, outputPathOf, pendingBackground, waitForBackground } from "./waiting.js"
 import {
   budgetLabel,
   formatTurns,
@@ -90,6 +91,10 @@ type GoalState = {
    *  reading the same unchanged output, which is how waiting gets mistaken for spinning. */
   lastObservation?: string
   observing: number
+  /** Consecutive turns spent waiting on background work, and the time that cost. While
+   *  a background command is unfinished the no-progress guards stand down, within a bound. */
+  waits?: number
+  waitedMs?: number
   reason?: string
 }
 
@@ -226,7 +231,7 @@ function continuationPrompt(state: GoalState, reason: string, quiet: boolean): s
 
 Judge's note: ${reason}
 
-The goal is not met yet. Take the next concrete step. Do not repeat a command that just failed or an edit you just made unless something has changed. If the goal cannot be completed as written, say so plainly and name the blocker — that pauses the loop instead of burning the remaining turns.`
+The goal is not met yet. Take the next concrete step. Do not repeat a command that just failed or an edit you just made unless something has changed. If a background command you started is still running and there is nothing else to do, call goal_wait instead of replying with a status update. If the goal cannot be completed as written, say so plainly and name the blocker — that pauses the loop instead of burning the remaining turns.`
 }
 
 function statusReport(state: GoalState | undefined): string {
@@ -246,7 +251,7 @@ function statusReport(state: GoalState | undefined): string {
 async function lastAssistantTurn(
   ctx: any,
   sessionID: string,
-): Promise<{ text: string; model?: ModelRef; toolCalls: number; observation: string }> {
+): Promise<{ text: string; model?: ModelRef; toolCalls: number; observation: string; pending: number }> {
   const messages = (await ctx.session.context({ sessionID })) as readonly any[]
 
   // A turn is every assistant message after the last user or synthetic input.
@@ -278,7 +283,13 @@ async function lastAssistantTurn(
       .trim()
     if (said) text = said
   }
-  return { text, model, toolCalls, observation: digest(observationOf(turn)) }
+  return {
+    text,
+    model,
+    toolCalls,
+    observation: digest(observationOf(turn)),
+    pending: pendingBackground(messages).length,
+  }
 }
 
 function parseVerdict(raw: string): { verdict: Verdict; reason: string } {
@@ -293,6 +304,20 @@ function parseVerdict(raw: string): { verdict: Verdict; reason: string } {
     throw new Error(`judge returned an unknown verdict: ${parsed.verdict}`)
   }
   return { verdict: parsed.verdict, reason: parsed.reason ?? "" }
+}
+
+/** True while some process has the file open. Unknown (no lsof) counts as still running. */
+async function holdsOpen(path: string): Promise<boolean> {
+  try {
+    const { execFile } = await import("node:child_process")
+    return await new Promise<boolean>((resolve) =>
+      execFile("lsof", ["-t", path], (error, stdout) =>
+        resolve(error && (error as { code?: unknown }).code === "ENOENT" ? true : stdout.trim().length > 0),
+      ),
+    )
+  } catch {
+    return true
+  }
 }
 
 export default Plugin.define({
@@ -642,6 +667,64 @@ export default Plugin.define({
       const result = await ctx.generate.text({ model: chosen, prompt })
       return parseVerdict(result.text)
     }
+
+    // Lets the agent say "I am waiting" instead of ending the turn with a status reply.
+    // The call blocks, so the turn stays open and no repeat or stall can form.
+    await ctx.tool.transform((editor) => {
+      editor.add({
+        name: "goal_wait",
+        description:
+          "While a standing goal is active and a background command you started is still running, " +
+          "call this instead of replying with a status update. It returns when the command " +
+          "finishes, or after `seconds`, whichever comes first.",
+        input: {
+          type: "object",
+          properties: {
+            seconds: { type: "number", description: "Longest to wait, 1 to 3600. Default 600." },
+          },
+        },
+        execute: async (raw: unknown, context) => {
+          const input = (raw ?? {}) as { seconds?: number }
+          const sessionID = context.sessionID as string
+          const state = await read(sessionID)
+          if (state?.status !== "active") {
+            return { content: "No goal is active, so there is nothing to wait for." }
+          }
+          const budget = Math.max(0, MAX_WAIT_MS - (state.waitedMs ?? 0)) / 1000
+          const seconds = Math.min(Math.max(1, Number(input?.seconds) || 600), 3600, budget)
+          if (seconds <= 0) return { content: "The waiting allowance for this goal is used up." }
+          const { end, waitedMs } = await waitForBackground({
+            seconds,
+            intervalMs: 5000,
+            signal: context.signal,
+            // The completion notice is only delivered once the turn ends, so inside a
+            // turn it never shows in the context. Whether the process still holds its
+            // output file open is the signal that is visible now.
+            pending: async () => {
+              const messages = (await ctx.session.context({ sessionID })) as readonly unknown[]
+              let alive = 0
+              for (const id of pendingBackground(messages)) {
+                const out = outputPathOf(messages, id)
+                if (!out || (await holdsOpen(out))) alive++
+              }
+              return alive
+            },
+            active: async () => (await read(sessionID))?.status === "active",
+          })
+          const current = await read(sessionID)
+          if (current) await write(sessionID, { ...current, waitedMs: (current.waitedMs ?? 0) + waitedMs })
+          const minutes = Math.round(waitedMs / 6000) / 10
+          return {
+            content:
+              end === "finished"
+                ? `Background work finished after ${minutes} min. Continue with its result.`
+                : end === "timeout"
+                  ? `Still running after ${minutes} min. Call goal_wait again, or do other work.`
+                  : `Wait ended early (${end}).`,
+          }
+        },
+      })
+    })
 
     const command = await ctx.command.transform((editor) => {
       editor.add({
@@ -1024,11 +1107,16 @@ export default Plugin.define({
           // Two deterministic no-progress checks. These, not the judge, are what
           // actually stop a runaway: a weak judge model will happily answer
           // "continue" to twenty identical replies.
-          const { toolCalls, text: replyText, observation } = await lastAssistantTurn(ctx, sessionID)
+          const { toolCalls, text: replyText, observation, pending } = await lastAssistantTurn(ctx, sessionID)
           const reply = normalize(replyText)
-          const repeated = reply.length > 0 && state.lastDigest === digest(reply)
+          // A background command still running makes a quiet turn legitimate: there is
+          // nothing to do but wait. The guards stand down for it, bounded by MAX_WAIT_MS so
+          // a hung job cannot hold the loop open forever.
+          const waiting = pending > 0 && (state.waitedMs ?? 0) < MAX_WAIT_MS
+          const waitSeconds = waiting ? backoffSeconds(state.waits ?? 0) : 0
+          const repeated = !waiting && reply.length > 0 && state.lastDigest === digest(reply)
           const repeats = repeated ? (state.repeats ?? 0) + 1 : 0
-          const stalled = toolCalls === 0 ? (state.stalled ?? 0) + 1 : 0
+          const stalled = waiting ? 0 : toolCalls === 0 ? (state.stalled ?? 0) + 1 : 0
           // The third no-progress shape: the agent used tools and said something new each
           // turn, but read back the same unchanged result — polling. Neither guard above can
           // see it, because the reply digest moves and the tool count is non-zero. It is
@@ -1036,7 +1124,7 @@ export default Plugin.define({
           // agent is told to stop polling before anything is stopped for it.
           const sameObservation =
             observation.length > 0 && state.lastObservation === observation
-          const observing = sameObservation ? (state.observing ?? 0) + 1 : 0
+          const observing = !waiting && sameObservation ? (state.observing ?? 0) + 1 : 0
           const looping: GoalState = {
             ...progressed,
             lastDigest: reply.length ? digest(reply) : state.lastDigest,
@@ -1044,6 +1132,8 @@ export default Plugin.define({
             repeats,
             stalled,
             observing,
+            waits: waiting ? (state.waits ?? 0) + 1 : 0,
+            waitedMs: (state.waitedMs ?? 0) + waitSeconds * 1000,
           }
 
           if (repeats >= 2) {
@@ -1080,6 +1170,11 @@ export default Plugin.define({
 
           const next: GoalState = { ...looping, turns: state.turns + 1 }
           await write(sessionID, next)
+          if (waitSeconds > 0) {
+            await new Promise((resolve) => setTimeout(resolve, waitSeconds * 1000))
+            // Someone may have paused, cleared or replaced the goal while we waited.
+            if ((await read(sessionID))?.status !== "active") continue
+          }
           // No status message here on purpose: a synthetic inbox message is a
           // real prompt, so it would start another execution, re-enter this
           // loop, and burn the budget twice as fast. The continuation prompt
