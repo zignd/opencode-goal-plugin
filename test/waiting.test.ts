@@ -1,6 +1,6 @@
 import { describe, test } from "node:test"
 import assert from "node:assert/strict"
-import { backoffSeconds, outputPathOf, pendingBackground } from "../src/waiting.ts"
+import { backoffSeconds, nextWaitedMs, outputPathOf, pendingBackground } from "../src/waiting.ts"
 
 const launch = (id: string) => ({
   type: "assistant",
@@ -127,5 +127,15 @@ describe("outputPathOf", () => {
     }
     assert.equal(outputPathOf([message], "sh_a1"), "/tmp/x/sh_a1.out")
     assert.equal(outputPathOf([message], "sh_other"), undefined)
+  })
+})
+
+describe("nextWaitedMs", () => {
+  test("adds to the running episode while waiting", () => {
+    assert.equal(nextWaitedMs(60_000, true, 30), 90_000)
+  })
+
+  test("a turn that is not waiting starts a new episode, however long the goal has run", () => {
+    assert.equal(nextWaitedMs(3_500_000, false, 0), 0)
   })
 })

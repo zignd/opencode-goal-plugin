@@ -108,3 +108,11 @@ export function outputPathOf(messages: readonly unknown[], id: string): string |
   }
   return undefined
 }
+
+/**
+ * The time spent waiting in the current episode. A goal can run for days, so the bound is on one stretch of
+ * waiting on background work, not on the goal's lifetime: any turn that is not waiting starts a new episode.
+ */
+export function nextWaitedMs(previous: number, waiting: boolean, waitSeconds: number): number {
+  return waiting ? previous + waitSeconds * 1000 : 0
+}

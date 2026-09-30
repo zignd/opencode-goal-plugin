@@ -2,7 +2,7 @@ import { realpathSync } from "node:fs"
 import { Plugin } from "@opencode/plugin"
 import { Goal, HELP_TEXT, type GoalView } from "./rpc.js"
 import { observationOf } from "./observation.js"
-import { backoffSeconds, MAX_WAIT_MS, outputPathOf, pendingBackground, waitForBackground } from "./waiting.js"
+import { backoffSeconds, MAX_WAIT_MS, nextWaitedMs, outputPathOf, pendingBackground, waitForBackground } from "./waiting.js"
 import {
   budgetLabel,
   formatTurns,
@@ -1134,7 +1134,7 @@ export default Plugin.define({
             stalled,
             observing,
             waits: waiting ? (state.waits ?? 0) + 1 : 0,
-            waitedMs: (state.waitedMs ?? 0) + waitSeconds * 1000,
+            waitedMs: nextWaitedMs(state.waitedMs ?? 0, waiting, waitSeconds),
           }
 
           if (repeats >= 2) {
