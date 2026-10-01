@@ -114,3 +114,55 @@ export function listen<E>(
 
   return () => controller.abort()
 }
+
+/**
+ * The same reconnection `listen` gives, exposed as an async iterable so a `for await` body can keep
+ * its own `continue`/`break` semantics. Where `listen` wraps a per-event handler, this wraps the
+ * stream itself: a dropped or failed subscription is reopened with a growing delay, and the caller's
+ * loop simply keeps receiving events. A stream that ends normally is also a reconnect — an ended
+ * subscription is the same deafness as a failed one.
+ */
+export async function* reconnect<E>(
+  subscribe: (signal: AbortSignal) => AsyncIterable<E>,
+  options: {
+    signal: AbortSignal
+    minDelay?: number
+    maxDelay?: number
+    onError?: (error: unknown, phase: Phase) => void
+    sleep?: (ms: number, signal: AbortSignal) => Promise<void>
+  },
+): AsyncGenerator<E> {
+  const { signal } = options
+  const sleep = options.sleep ?? sleepUnlessAborted
+  const minDelay = options.minDelay ?? 500
+  const maxDelay = options.maxDelay ?? 10_000
+  const report = (error: unknown, phase: Phase) => {
+    try {
+      options.onError?.(error, phase)
+    } catch {
+      // A broken error sink must not take the stream down with it.
+    }
+  }
+  let delay = minDelay
+  let reconnecting = false
+
+  while (!signal.aborted) {
+    if (reconnecting) {
+      await sleep(delay, signal)
+      if (signal.aborted) return
+      delay = Math.min(delay * 2, maxDelay)
+    }
+    reconnecting = true
+
+    try {
+      for await (const event of subscribe(signal)) {
+        if (signal.aborted) return
+        // Something arrived, so the connection is healthy: forget the backoff.
+        delay = minDelay
+        yield event
+      }
+    } catch (error) {
+      if (!signal.aborted) report(error, "stream")
+    }
+  }
+}

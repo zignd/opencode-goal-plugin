@@ -28,6 +28,8 @@ import {
 } from "./settings.js"
 // Pure, no JSX, so the server can share the parser with the TUI.
 import { parseDisplayArgument } from "./display.js"
+import { reconnect } from "./listen.js"
+import { NEVER_JUDGED_HINT, neverJudged } from "./status-flag.js"
 
 /**
  * Persistent goals, modelled on the Ralph loop.
@@ -242,6 +244,8 @@ function statusReport(state: GoalState | undefined): string {
     `  ${state.goal}`,
   ]
   if (state.reason) lines.push(`  Last judge: ${state.reason}`)
+  // "running" is also the word for a goal no judge has ever seen, so name that case.
+  if (neverJudged(state.status, state.turns, state.reason)) lines.push(NEVER_JUDGED_HINT)
   return lines.join("\n")
 }
 
@@ -1049,7 +1053,18 @@ export default Plugin.define({
 
     const controller = new AbortController()
     void (async () => {
-      for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+      // A bare `for await` on the event stream exits for good when the stream ends or throws — most
+      // reliably when the server restarts — and the listener then stays registered while judging
+      // nothing: the goal reads "running" forever and even a user message no longer pauses it.
+      // `reconnect` reopens the subscription with a growing delay, so the body below keeps its own
+      // `continue`/`break` and never sees the gap.
+      for await (const event of reconnect(
+        (signal) => ctx.event.subscribe({ signal }),
+        {
+          signal: controller.signal,
+          onError: (error) => console.error?.("[goal] event stream failed; reconnecting", error),
+        },
+      )) {
         if (
           event.type !== "session.execution.succeeded" &&
           event.type !== "session.execution.failed" &&
