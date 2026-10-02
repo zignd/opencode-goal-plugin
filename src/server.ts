@@ -2,7 +2,30 @@ import { realpathSync } from "node:fs"
 import { Plugin } from "@opencode/plugin"
 import { Goal, HELP_TEXT, type GoalView } from "./rpc.js"
 import { observationOf } from "./observation.js"
-import { backoffSeconds, MAX_WAIT_MS, nextWaitedMs, outputPathOf, pendingBackground, waitForBackground } from "./waiting.js"
+import { capText } from "./cap.js"
+import { parseGoal, renderContract, type Contract } from "./contract.js"
+import { appendEvidence, emptyDigest, renderEvidence, withPending, type EvidenceDigest } from "./evidence.js"
+import { goalBlocked, goalEvidence, goalPending, heldByTool } from "./goal-tools.js"
+import { buildJudgePrompt, continuationPrompt, TOOLS } from "./prompt.js"
+import { DRAFT_USAGE, draftPrompt, readSkillBody, SKILL_DESCRIPTION, SKILL_ID, SKILL_PATH } from "./skill.js"
+import {
+  clampTimeout,
+  confirmDone,
+  DEFAULT_VERIFY_TIMEOUT_MS,
+  renderVerifyBlock,
+  runVerifyCommand,
+} from "./verify.js"
+import {
+  allowanceUsedMessage,
+  backoffSeconds,
+  countPendingAlive,
+  MAX_WAIT_MS,
+  nextWaitedMs,
+  pendingBackground,
+  sessionBusy,
+  stillRunningMessage,
+  waitForBackground,
+} from "./waiting.js"
 import {
   budgetLabel,
   formatTurns,
@@ -56,8 +79,10 @@ import { NEVER_JUDGED_HINT, neverJudged } from "./status-flag.js"
  *   /goal clear        drop the goal
  *
  * A goal can carry a completion contract, which is what makes the judge
- * accurate. Any line starting with a known field prefix is pulled out of the
- * goal text and shown to the judge as part of the bar for "done":
+ * accurate. A known field prefix, or a fence whose info string is that prefix,
+ * is pulled out of the goal text and shown to the judge as the bar for "done".
+ * `verify-cmd` is not a description: after a first-pass `done` the plugin runs
+ * it and judges again with the output attached.
  *
  *   /goal Port auth to JWT
  *   verify: pytest tests/auth passes
@@ -68,14 +93,6 @@ import { NEVER_JUDGED_HINT, neverJudged } from "./status-flag.js"
 
 type Verdict = "done" | "continue" | "blocked"
 type Status = "active" | "paused" | "done" | "blocked"
-
-type Contract = {
-  outcome?: string
-  verification?: string
-  constraints?: string
-  boundaries?: string
-  stopWhen?: string
-}
 
 type GoalState = {
   goal: string
@@ -98,20 +115,10 @@ type GoalState = {
   waits?: number
   waitedMs?: number
   reason?: string
-}
-
-/** Only these prefixes are treated as contract fields, so a goal that merely
- *  contains a colon ("Fix bug: the parser drops commas") is never mangled. */
-const FIELDS: Record<string, keyof Contract> = {
-  outcome: "outcome",
-  verify: "verification",
-  "verified by": "verification",
-  verification: "verification",
-  constraints: "constraints",
-  preserve: "constraints",
-  boundaries: "boundaries",
-  scope: "boundaries",
-  "stop when": "stopWhen",
+  /** Set when `goal_blocked` paused the loop. A later judge verdict must not clear it. */
+  pausedBy?: "tool"
+  /** Last verify-cmd results and the ids still pending. Not cleared when a reply forgets them. */
+  evidence?: EvidenceDigest
 }
 
 const DEFAULT_STALL_LIMIT = 2
@@ -136,44 +143,6 @@ function normalize(text: string): string {
   return text.toLowerCase().replace(/\s+/g, " ").trim()
 }
 
-/** Split raw command text into a goal headline and its completion contract. */
-function parseGoal(raw: string): { goal: string; contract: Contract } {
-  const headline: string[] = []
-  const contract: Contract = {}
-  const current: { key: keyof Contract; lines: string[] }[] = []
-
-  for (const line of raw.split("\n")) {
-    const match = /^([a-z][a-z ]*):\s*(.*)$/i.exec(line.trim())
-    const key = match ? FIELDS[match[1].trim().toLowerCase()] : undefined
-    if (key && match![2].trim()) {
-      current.push({ key, lines: [match![2].trim()] })
-      continue
-    }
-    if (current.length && line.trim()) {
-      current[current.length - 1].lines.push(line.trim())
-      continue
-    }
-    current.length = 0
-    if (line.trim()) headline.push(line.trim())
-  }
-
-  for (const entry of current) {
-    contract[entry.key] = [...(contract[entry.key] ? [contract[entry.key]!] : []), ...entry.lines].join(" ")
-  }
-
-  return { goal: headline.join(" "), contract }
-}
-
-function renderContract(contract: Contract): string {
-  const lines: string[] = []
-  if (contract.outcome) lines.push(`- Outcome: ${contract.outcome}`)
-  if (contract.verification) lines.push(`- Proof it is done: ${contract.verification}`)
-  if (contract.constraints) lines.push(`- Must not change: ${contract.constraints}`)
-  if (contract.boundaries) lines.push(`- In scope: ${contract.boundaries}`)
-  if (contract.stopWhen) lines.push(`- Stop and ask when: ${contract.stopWhen}`)
-  return lines.length ? `\n\n${lines.join("\n")}` : ""
-}
-
 /** Project internal state into the shape the TUI panel renders. */
 function toView(state: GoalState): Omit<GoalView, "sessionID"> {
   return {
@@ -185,55 +154,9 @@ function toView(state: GoalState): Omit<GoalView, "sessionID"> {
     repeats: state.repeats ?? 0,
     observing: state.observing ?? 0,
     reason: state.reason ?? "",
-    verification: state.contract.verification ?? "",
+    verification: state.contract.verification || state.contract.verifyCmd?.join("\n") || "",
     updatedAt: Date.now(),
   }
-}
-
-const JUDGE_PROMPT = `You are a strict completion judge for an autonomous coding agent. You do not do the work and you never give advice. Your only job is to classify the state of a standing goal after one turn.
-
-<goal>
-{{GOAL}}
-</goal>{{CONTRACT}}
-
-<loop state>
-Turn {{TURN}} of at most {{MAX_TURNS}} have been spent on this goal.
-Tool calls made in the turn you are judging: {{TOOLCALLS}}
-Consecutive turns that changed nothing at all: {{STALLED}}
-Consecutive turns that repeated one observation without a result changing: {{OBSERVING}}
-Your verdict on the previous turn was: "continue", because: {{PREVIOUS}}
-</loop state>
-
-<agent's last response>
-{{RESPONSE}}
-</agent's last response>
-
-Reply with exactly one line of strict JSON and nothing else:
-{"verdict": "done" | "blocked" | "continue", "reason": "<one sentence>"}
-
-Rules:
-
-- "done" ONLY when the response carries concrete evidence the whole goal is satisfied: a command that passed along with its output, files that were actually created or changed, a test suite that is green. A claim, a plan, an intention, or "I will now..." is never done. If the goal's own proof condition is named above, that specific proof must be present.
-- "blocked" ONLY when the GOAL cannot be concluded as written: impossible, self-contradictory, outside the repository's scope, or dependent on credentials, hardware, or decisions the agent does not have. It also covers a goal asking for something no amount of the agent's work can produce, even when the agent has not admitted that yet.
-- "blocked" requires goal-level evidence. A turn that was unproductive, slow, repeated, or made no change is evidence about THIS TURN, never about whether the goal is reachable. Repetition is recoverable — the next turn can do something different — so repetition alone must never produce "blocked", however many turns it has happened.
-- "continue" when real progress is still possible, AND when this turn was unproductive. Slow is fine. Waiting is fine. Stalled is not.
-- A turn that checked on work already in flight — a background build, a long test run, a command started earlier — is WAITING, not going in circles, unless the underlying work shows no progress at all across several turns. Do not read a repeated read-only check as a dead goal.
-- If the loop state above suggests repetition, the correct verdict is still "continue": say in the reason what the agent should change (do different work, or stop polling and wait for the result), and let the next turn act on it.
-- Judge only what is in front of you. Do not assume work happened off-screen. Equally, do not assume work did NOT happen off-screen: a long-running command may still be in flight.`
-
-function continuationPrompt(state: GoalState, reason: string, quiet: boolean): string {
-  // With a TUI watching, the panel already shows which turn this is, so the
-  // banner is dropped to keep the transcript quiet. Without one — desktop,
-  // web, `opencode run` — it stays, because otherwise a continuation would be
-  // indistinguishable from a message the user typed.
-  const banner = quiet
-    ? ""
-    : `↻ [continuing toward your standing goal — turn ${formatTurns(state.turns, state.maxTurns)}]\n\n`
-  return `${banner}Goal: ${state.goal}${renderContract(state.contract)}
-
-Judge's note: ${reason}
-
-The goal is not met yet. Take the next concrete step. Do not repeat a command that just failed or an edit you just made unless something has changed. If a background command you started is still running and there is nothing else to do, call goal_wait instead of replying with a status update. If the goal cannot be completed as written, say so plainly and name the blocker — that pauses the loop instead of burning the remaining turns.`
 }
 
 function statusReport(state: GoalState | undefined): string {
@@ -243,7 +166,8 @@ function statusReport(state: GoalState | undefined): string {
     `${icon} Goal (${state.status}) — ${formatTurns(state.turns, state.maxTurns)} turns used`,
     `  ${state.goal}`,
   ]
-  if (state.reason) lines.push(`  Last judge: ${state.reason}`)
+  if (state.pausedBy === "tool" && state.reason) lines.push(`  Paused: ${state.reason}`)
+  else if (state.reason) lines.push(`  Last judge: ${state.reason}`)
   // "running" is also the word for a goal no judge has ever seen, so name that case.
   if (neverJudged(state.status, state.turns, state.reason)) lines.push(NEVER_JUDGED_HINT)
   return lines.join("\n")
@@ -255,7 +179,7 @@ function statusReport(state: GoalState | undefined): string {
 async function lastAssistantTurn(
   ctx: any,
   sessionID: string,
-): Promise<{ text: string; model?: ModelRef; toolCalls: number; observation: string; pending: number }> {
+): Promise<{ text: string; model?: ModelRef; toolCalls: number; observation: string; pending: string[] }> {
   const messages = (await ctx.session.context({ sessionID })) as readonly any[]
 
   // A turn is every assistant message after the last user or synthetic input.
@@ -292,7 +216,7 @@ async function lastAssistantTurn(
     model,
     toolCalls,
     observation: digest(observationOf(turn)),
-    pending: pendingBackground(messages).length,
+    pending: pendingBackground(messages),
   }
 }
 
@@ -656,31 +580,42 @@ export default Plugin.define({
       throw new Error("no model available to judge with")
     }
 
-    const judge = async (sessionID: string, state: GoalState) => {
+    const verifyTimeout = clampTimeout(
+      typeof ctx.options.verifyTimeoutMs === "number" ? ctx.options.verifyTimeoutMs : DEFAULT_VERIFY_TIMEOUT_MS,
+    )
+
+    const judge = async (sessionID: string, state: GoalState, verify?: string) => {
       const { text, model, toolCalls } = await lastAssistantTurn(ctx, sessionID)
       const chosen = (await settingsFor(sessionID)).judge ?? model ?? (await resolveJudgeModel(sessionID))
-      const prompt = JUDGE_PROMPT.replace("{{GOAL}}", state.goal)
-        .replace("{{CONTRACT}}", renderContract(state.contract))
-        .replace("{{TURN}}", String(state.turns + 1))
-        .replace("{{MAX_TURNS}}", budgetLabel(state.maxTurns))
-        .replace("{{TOOLCALLS}}", String(toolCalls))
-        .replace("{{STALLED}}", String(state.stalled ?? 0))
-        .replace("{{OBSERVING}}", String(state.observing ?? 0))
-        .replace("{{PREVIOUS}}", state.reason || "(this is the first turn)")
-        .replace("{{RESPONSE}}", text.slice(-4000) || "(the agent produced no text this turn)")
+      const prompt = buildJudgePrompt({
+        goal: state.goal,
+        contract: renderContract(state.contract),
+        turn: String(state.turns + 1),
+        maxTurns: budgetLabel(state.maxTurns),
+        toolCalls: String(toolCalls),
+        stalled: String(state.stalled ?? 0),
+        observing: String(state.observing ?? 0),
+        previous: state.reason || "(this is the first turn)",
+        response: capText(text) || "(the agent produced no text this turn)",
+        evidence: renderEvidence(state.evidence),
+        verify,
+      })
       const result = await ctx.generate.text({ model: chosen, prompt })
       return parseVerdict(result.text)
     }
 
-    // Lets the agent say "I am waiting" instead of ending the turn with a status reply.
-    // The call blocks, so the turn stays open and no repeat or stall can form.
+    const pendingIds = async (sessionID: string) => {
+      const messages = (await ctx.session.context({ sessionID })) as readonly unknown[]
+      return { messages, ids: pendingBackground(messages) }
+    }
+
+    // Permission prompts stay `ask`. This plugin does not turn an unanswered prompt into `allow`.
+    // Tools stay registered when no goal is active: a tool that appears and disappears is worse
+    // than a no-op, and the host does not re-advertise one between turns.
     await ctx.tool.transform((editor) => {
       editor.add({
-        name: "goal_wait",
-        description:
-          "While a standing goal is active and a background command you started is still running, " +
-          "call this instead of replying with a status update. It returns when the command " +
-          "finishes, or after `seconds`, whichever comes first.",
+        name: TOOLS.goal_wait.name,
+        description: TOOLS.goal_wait.description,
         input: {
           type: "object",
           properties: {
@@ -694,44 +629,140 @@ export default Plugin.define({
           if (state?.status !== "active") {
             return { content: "No goal is active, so there is nothing to wait for." }
           }
+          const listed = await pendingIds(sessionID)
           const budget = Math.max(0, MAX_WAIT_MS - (state.waitedMs ?? 0)) / 1000
           const seconds = Math.min(Math.max(1, Number(input?.seconds) || 600), 3600, budget)
-          if (seconds <= 0) return { content: "The waiting allowance for this goal is used up." }
+          if (seconds <= 0) return { content: allowanceUsedMessage(listed.ids) }
           const { end, waitedMs } = await waitForBackground({
             seconds,
             intervalMs: 5000,
             graceMs: 8000,
             signal: context.signal,
-            // The completion notice is only delivered once the turn ends, so inside a
-            // turn it never shows in the context. Whether the process still holds its
-            // output file open is the signal that is visible now.
+            // A shell's completion notice is not visible until the turn ends, so the open
+            // output file is the signal. A child session has no such file: a missing path
+            // is unknown, not alive, and liveness is a query of that session.
             pending: async () => {
-              const messages = (await ctx.session.context({ sessionID })) as readonly unknown[]
-              let alive = 0
-              for (const id of pendingBackground(messages)) {
-                const out = outputPathOf(messages, id)
-                if (!out || (await holdsOpen(out))) alive++
-              }
-              return alive
+              const { messages } = await pendingIds(sessionID)
+              return countPendingAlive(messages, {
+                fileOpen: holdsOpen,
+                sessionBusy: async (id) => {
+                  try {
+                    const info = (await ctx.session.get({ sessionID: id })) as {
+                      outcome?: string | null
+                      time?: { idle?: unknown; updated?: unknown } | null
+                    }
+                    return sessionBusy(info)
+                  } catch {
+                    return false
+                  }
+                },
+              })
             },
             active: async () => (await read(sessionID))?.status === "active",
           })
           const current = await read(sessionID)
           if (current) await write(sessionID, { ...current, waitedMs: (current.waitedMs ?? 0) + waitedMs })
           const minutes = Math.round(waitedMs / 6000) / 10
+          const still = (await pendingIds(sessionID)).ids
           return {
             content:
               end === "finished"
                 ? `Background work finished after ${minutes} min. Continue with its result.`
                 : end === "timeout"
-                  ? `Still running after ${minutes} min. Call goal_wait again, or do other work.`
+                  ? stillRunningMessage(minutes, still)
                   : `Wait ended early (${end}).`,
           }
         },
       })
+      editor.add({
+        name: TOOLS.goal_blocked.name,
+        description: TOOLS.goal_blocked.description,
+        input: {
+          type: "object",
+          properties: {
+            reason: { type: "string", description: "Why the goal cannot be completed as written." },
+          },
+          required: ["reason"],
+        },
+        execute: async (raw: unknown, context) => {
+          const sessionID = context.sessionID as string
+          const state = await read(sessionID)
+          const effect = goalBlocked(state, (raw as { reason?: unknown } | null)?.reason)
+          if (effect.state) await write(sessionID, effect.state)
+          return { content: effect.content }
+        },
+      })
+      editor.add({
+        name: TOOLS.goal_pending.name,
+        description: TOOLS.goal_pending.description,
+        input: { type: "object", properties: {} },
+        execute: async (_raw: unknown, context) => {
+          const sessionID = context.sessionID as string
+          const state = await read(sessionID)
+          const effect = goalPending(state, (await pendingIds(sessionID)).ids)
+          return { content: effect.content }
+        },
+      })
+      editor.add({
+        name: TOOLS.goal_evidence.name,
+        description: TOOLS.goal_evidence.description,
+        input: {
+          type: "object",
+          properties: {
+            command: { type: "string", description: "The command that just ran." },
+            exit: { type: "number", description: "Its exit code." },
+            output: { type: "string", description: "Its output. Long output is capped." },
+          },
+          required: ["command", "exit", "output"],
+        },
+        execute: async (raw: unknown, context) => {
+          const sessionID = context.sessionID as string
+          const state = await read(sessionID)
+          const input = (raw ?? {}) as { command?: unknown; exit?: unknown; output?: unknown }
+          const effect = goalEvidence(state, input)
+          if (effect.state) await write(sessionID, effect.state)
+          return { content: effect.content }
+        },
+      })
     })
 
+    // A skill is advertised by its description and loaded on demand. A failure to read the
+    // file must not stop the plugin: the loop and /draft-goal do not depend on it.
+    let contractBody = ""
+    try {
+      contractBody = readSkillBody()
+      await ctx.skill.transform((editor) => {
+        editor.add({
+          id: SKILL_ID,
+          name: "Goal contract",
+          description: SKILL_DESCRIPTION,
+          autoinvoke: true,
+          path: SKILL_PATH,
+          content: contractBody,
+        } as any)
+      })
+    } catch (error) {
+      console.warn?.("[goal] the goal-contract skill was not registered", error)
+    }
+
     const command = await ctx.command.transform((editor) => {
+      editor.add({
+        name: "draft-goal",
+        description: "Write a /goal for you to paste, without starting the work. Usage: /draft-goal <outcome>",
+        execute: async ({ sessionID, prompt, delivery }) => {
+          const outcome = prompt.text.replace(/^\s*\/draft-goal\b/i, "").trim()
+          if (!outcome) {
+            await ctx.session.synthetic({ sessionID, text: DRAFT_USAGE })
+            return
+          }
+          await ctx.session.prompt({
+            ...prompt,
+            sessionID,
+            text: draftPrompt(outcome, contractBody),
+            delivery,
+          })
+        },
+      })
       editor.add({
         name: "goal",
         description:
@@ -824,6 +855,7 @@ export default Plugin.define({
                 lastDigest: undefined,
                 lastObservation: undefined,
                 reason: undefined,
+                pausedBy: undefined,
               }
               await write(sessionID, resumed)
               await ctx.session.prompt({
@@ -832,6 +864,7 @@ export default Plugin.define({
                   { ...resumed, turns: 1 },
                   "resumed by the user",
                   await suppressed(sessionID),
+                  (await pendingIds(sessionID)).ids,
                 ),
               })
               return
@@ -1036,6 +1069,7 @@ export default Plugin.define({
             lastDigest: undefined,
             lastObservation: undefined,
             reason: undefined,
+            evidence: emptyDigest(),
           }
           await write(sessionID, state)
           await ctx.session.prompt({
@@ -1097,20 +1131,69 @@ export default Plugin.define({
             continue
           }
 
+          const preview = await lastAssistantTurn(ctx, sessionID)
+          let evidence = withPending(state.evidence ?? emptyDigest(), preview.pending)
           let verdict: { verdict: Verdict; reason: string }
           try {
-            verdict = await judge(sessionID, state)
+            verdict = await judge(sessionID, { ...state, evidence })
           } catch (error) {
             // Fail open: a broken judge must not wedge the loop. The turn budget
             // is the real backstop.
             verdict = { verdict: "continue", reason: `judge unavailable (${(error as Error).message})` }
           }
 
-          const progressed: GoalState = { ...state, reason: verdict.reason }
+          // Commands run only after a first-pass done. A continue or blocked does not run them,
+          // and the second pass may demote done but must not promote a continue.
+          if (verdict.verdict === "done" && (state.contract.verifyCmd?.length ?? 0) > 0) {
+            try {
+              const session = (await ctx.session.get({ sessionID })) as { location?: { directory?: string } }
+              const cwd = session?.location?.directory
+              const confirmed = await confirmDone({
+                first: verdict,
+                commands: state.contract.verifyCmd!,
+                run: async (command) => {
+                  if (!cwd) {
+                    return {
+                      command,
+                      exit: null,
+                      output: "no session directory; command not run",
+                      timedOut: false,
+                    }
+                  }
+                  return runVerifyCommand(command, { cwd, env: process.env, timeoutMs: verifyTimeout })
+                },
+                judgeAgain: async ({ results }) => {
+                  const withResults = results.reduce((digest, result) => appendEvidence(digest, result), evidence)
+                  try {
+                    return await judge(
+                      sessionID,
+                      { ...state, evidence: withResults },
+                      renderVerifyBlock("done", results),
+                    )
+                  } catch (error) {
+                    return {
+                      verdict: "continue" as const,
+                      reason: `verify-cmd judge unavailable (${(error as Error).message})`,
+                    }
+                  }
+                },
+              })
+              evidence = confirmed.results.reduce((digest, result) => appendEvidence(digest, result), evidence)
+              verdict = { verdict: confirmed.verdict, reason: confirmed.reason }
+            } catch (error) {
+              verdict = { verdict: "continue", reason: `verify-cmd unavailable (${(error as Error).message})` }
+            }
+          }
+
+          // A goal_blocked call during this turn already paused. Do not let the verdict overwrite it.
+          const fresh = await read(sessionID)
+          if (!fresh || heldByTool(fresh)) continue
+
+          const progressed: GoalState = { ...fresh, evidence, reason: verdict.reason }
 
           if (verdict.verdict === "done") {
             await write(sessionID, { ...progressed, status: "done" })
-            return terminal(sessionID, `✓ Goal achieved: ${verdict.reason || state.goal}`)
+            return terminal(sessionID, `✓ Goal achieved: ${verdict.reason || fresh.goal}`)
           }
           if (verdict.verdict === "blocked") {
             await write(sessionID, { ...progressed, status: "blocked" })
@@ -1128,28 +1211,30 @@ export default Plugin.define({
           // A background command still running makes a quiet turn legitimate: there is
           // nothing to do but wait. The guards stand down for it, bounded by MAX_WAIT_MS so
           // a hung job cannot hold the loop open forever.
-          const waiting = pending > 0 && (state.waitedMs ?? 0) < MAX_WAIT_MS
-          const waitSeconds = waiting ? backoffSeconds(state.waits ?? 0) : 0
-          const repeated = !waiting && reply.length > 0 && state.lastDigest === digest(reply)
-          const repeats = repeated ? (state.repeats ?? 0) + 1 : 0
-          const stalled = waiting ? 0 : toolCalls === 0 ? (state.stalled ?? 0) + 1 : 0
+          evidence = withPending(evidence, pending)
+          const waiting = pending.length > 0 && (fresh.waitedMs ?? 0) < MAX_WAIT_MS
+          const waitSeconds = waiting ? backoffSeconds(fresh.waits ?? 0) : 0
+          const repeated = !waiting && reply.length > 0 && fresh.lastDigest === digest(reply)
+          const repeats = repeated ? (fresh.repeats ?? 0) + 1 : 0
+          const stalled = waiting ? 0 : toolCalls === 0 ? (fresh.stalled ?? 0) + 1 : 0
           // The third no-progress shape: the agent used tools and said something new each
           // turn, but read back the same unchanged result — polling. Neither guard above can
           // see it, because the reply digest moves and the tool count is non-zero. It is
           // counted separately and, on the first turn, only *reported* to the judge, so the
           // agent is told to stop polling before anything is stopped for it.
           const sameObservation =
-            observation.length > 0 && state.lastObservation === observation
-          const observing = !waiting && sameObservation ? (state.observing ?? 0) + 1 : 0
+            observation.length > 0 && fresh.lastObservation === observation
+          const observing = !waiting && sameObservation ? (fresh.observing ?? 0) + 1 : 0
           const looping: GoalState = {
             ...progressed,
-            lastDigest: reply.length ? digest(reply) : state.lastDigest,
-            lastObservation: observation.length ? observation : state.lastObservation,
+            evidence,
+            lastDigest: reply.length ? digest(reply) : fresh.lastDigest,
+            lastObservation: observation.length ? observation : fresh.lastObservation,
             repeats,
             stalled,
             observing,
-            waits: waiting ? (state.waits ?? 0) + 1 : 0,
-            waitedMs: nextWaitedMs(state.waitedMs ?? 0, waiting, waitSeconds),
+            waits: waiting ? (fresh.waits ?? 0) + 1 : 0,
+            waitedMs: nextWaitedMs(fresh.waitedMs ?? 0, waiting, waitSeconds),
           }
 
           if (repeats >= 2) {
@@ -1176,15 +1261,15 @@ export default Plugin.define({
 
           // The budget gate. An unlimited budget is never spent, which is what
           // leaves the judge and the stall/repetition guards as the only stops.
-          if (isExhausted(state.turns, state.maxTurns)) {
+          if (isExhausted(fresh.turns, fresh.maxTurns)) {
             await write(sessionID, { ...progressed, status: "paused", stalled })
             return terminal(
               sessionID,
-              `⏸ Goal paused — ${formatTurns(state.maxTurns ?? 0, state.maxTurns)} turns used. Use /goal resume for another ${state.maxTurns}, or /goal clear to stop.`,
+              `⏸ Goal paused — ${formatTurns(fresh.maxTurns ?? 0, fresh.maxTurns)} turns used. Use /goal resume for another ${fresh.maxTurns}, or /goal clear to stop.`,
             )
           }
 
-          const next: GoalState = { ...looping, turns: state.turns + 1 }
+          const next: GoalState = { ...looping, turns: fresh.turns + 1 }
           await write(sessionID, next)
           if (waitSeconds > 0) {
             await new Promise((resolve) => setTimeout(resolve, waitSeconds * 1000))
@@ -1197,7 +1282,7 @@ export default Plugin.define({
           // itself already carries the judge's reason.
           await ctx.session.prompt({
             sessionID,
-            text: continuationPrompt(next, verdict.reason, await suppressed(sessionID)),
+            text: continuationPrompt(next, verdict.reason, await suppressed(sessionID), pending),
           })
         } catch (error) {
           const current = await read(sessionID)
