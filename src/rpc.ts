@@ -42,6 +42,7 @@ export const HELP_TEXT = `/goal <text>          set the goal and start working
 
 Completion contract — lines the judge uses to decide "done":
   verify: / verified by:    the command or artifact that proves it
+  verify-cmd:               a cheap re-read the plugin runs after a first-pass done
   constraints: / preserve:  what must not change
   scope: / boundaries:      what is in scope
   outcome:                  the end state that must be true

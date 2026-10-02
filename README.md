@@ -41,7 +41,9 @@ small fast model to cut cost (the call is ~200 output tokens, once per turn).
   An active goal also survives an OpenCode restart and picks the loop back up on your next
   message.
 - **Completion contracts** — attach `verify:`, `constraints:`, `scope:` and `stop when:`
-  lines to a goal so the judge knows what "done" actually means instead of guessing.
+  lines to a goal so the judge knows what "done" actually means instead of guessing. A field
+  may be a fence when it needs more than one paragraph. `verify-cmd:` is a cheap re-read the
+  plugin actually runs.
 - **Five independent stop conditions**, three of them deterministic (see below), so a runaway
   loop cannot burn a budget unattended.
 - **Per-session state** — goals are keyed by session ID, so several projects can have
@@ -110,6 +112,7 @@ defaults:
 | `pollLimit` | `3` | Consecutive turns that re-read an unchanged result before the loop is called polling. Distinct from `stallLimit`: a polling turn *does* use tools, it just learns nothing. |
 | `judgeModel` | session model | Model used for the `done` / `continue` / `blocked` verdict. |
 | `quiet` | `false` | Stop posting the loop's turn banner and completion notices into the transcript while the panel is open. |
+| `verifyTimeoutMs` | `120000` | Timeout for one `verify-cmd` re-read. Capped at 5 minutes. A five-gate is the wrong command for this field. |
 
 ### What a "turn" is
 
@@ -365,7 +368,10 @@ Pressing <kbd>esc</kbd> also stops the loop, because an interrupted turn pauses 
 ### Completion contracts
 
 A vague goal can only be judged vaguely. Give the judge a bar to clear. Any line starting with
-a known field prefix is lifted out of the goal text; everything else is the objective.
+a known field prefix is lifted out of the goal text; everything else is the objective. A field
+that needs a blank line is a fence. The info string is the field name. A fence whose info
+string is not a known field is left in the headline, so a goal that quotes a code block is
+not mangled.
 
 ```
 /goal Port the auth service from session cookies to JWT
@@ -375,16 +381,67 @@ scope: only services/auth and its tests
 stop when: a database schema migration is required
 ```
 
+~~~~
+/goal Close the remaining Phase 20 items
+```verify
+bash scripts/track-plan.sh shows Phase 20 strictly above 72
+
+the last five-gate log is green
+```
+verify-cmd: grep -q "exit 0" build/five-gate.log
+~~~~
+
+`verify:` is a description the judge reads. `verify-cmd:` is a command the plugin runs, and
+only after a first judge pass returns `done`. The second pass sees the exit code and the
+output, and may demote `done` to `continue`. It does not re-run the proof. A five-gate takes
+about ten minutes and holds a lock; the field is a cheap re-read of a log the agent already
+wrote (`grep`, `tail`, `track-plan.sh`). The default timeout is 120 seconds, which is enough
+for that re-read and too short for a gate. A command that would exceed it is the wrong
+command. Several `verify-cmd:` lines, or several fences, are several commands, run in order.
+
 | Prefix | Meaning |
 | --- | --- |
 | `outcome:` | The single end state that must be true when done. |
-| `verify:` / `verified by:` / `verification:` | The command, test, or artifact that proves it. |
+| `verify:` / `verified by:` / `verification:` | The command, test, or artifact that proves it. A description, not a command the plugin runs. |
+| `verify-cmd:` / `verified by running:` | A cheap re-read the plugin runs after a first-pass `done`. Not a five-gate. |
 | `constraints:` / `preserve:` | What must not change or regress. |
 | `scope:` / `boundaries:` | Which files, directories, or systems are in scope. |
-| `stop when:` | The condition under which the agent should stop and ask. |
+| `stop when:` | The condition under which the agent should call `goal_blocked`. |
 
 Only these exact prefixes are recognised, so an ordinary goal containing a colon
-(`Fix bug: the parser drops commas`) is left alone.
+(`Fix bug: the parser drops commas`) is left alone. The one-line form still works: a non-blank
+continuation line stays in the field, and a blank line ends it.
+
+## Writing a goal in a fresh session
+
+Installing the plugin puts the tools on the turn, not the contract. Two things cover that:
+
+- The `goal-contract` skill. Its description is on the skill list every turn, and the agent loads the body when you ask for a goal. The body is `skills/goal-contract.md`, and a test checks it names every field the parser accepts.
+- `/draft-goal <outcome>`. It does not depend on the agent choosing the skill: it submits a prompt that carries the contract and asks for the `/goal` text, without starting the work.
+
+## Tools the agent can call
+
+The agent does not read this plugin. It learns a tool from the description on the tool list,
+plus one line in the continuation prompt while a goal is looping. A description that only
+says what the tool returns will sit unused. The tools stay registered when no goal is active
+and answer with a sentence; hiding them between turns is worse than a no-op.
+
+| Tool | Call it instead of | Waits on |
+| --- | --- | --- |
+| `goal_wait` | replying with a status update while something you started is still running | — |
+| `goal_blocked` | saying in prose that the goal cannot be finished as written | nothing; a reason pauses immediately |
+| `goal_pending` | guessing which background jobs are still running | the waiter seeing child sessions, not only shells |
+| `goal_evidence` | leaving a proof only in the reply | the evidence digest |
+
+`goal_blocked` requires a reason. It pauses the loop, and the next judge pass does not
+override that pause. `/goal resume` still does, and `/goal status` shows the reason so the
+resume is a choice. Naming a blocker in the reply does not pause anything.
+
+`goal_pending` returns unfinished `sh_*` and `ses_*` ids and nothing else. `goal_evidence`
+appends a command, an exit code, and a capped output to the digest. Filing evidence does not
+finish the goal. There is no `goal_done`: the judge, plus `verify-cmd` when one was set, is
+the only path that finishes a goal. The plugin does not copy the shell, the file tools, or
+the subagent tool.
 
 ## How the loop stops
 
@@ -392,7 +449,7 @@ The point of this plugin is that it terminates. Six conditions, checked in order
 
 | # | Condition | Kind |
 | --- | --- | --- |
-| 1 | Judge returns `done` — the reply carries concrete evidence, such as a passing command and its output | model |
+| 1 | Judge returns `done` — the reply carries concrete evidence, or the digest plus a `verify-cmd` that just passed | model |
 | 2 | Judge returns `blocked` — impossible, out of scope, needs credentials or hardware you do not have | model |
 | 3 | **Stall** — `stallLimit` consecutive turns ran no tools at all, so nothing changed however confident the prose | deterministic |
 | 4 | **Repetition** — the agent produced the same reply twice running | deterministic |
@@ -417,7 +474,8 @@ goal unachievable and paused. The work was not unachievable; the agent was waiti
 So repetition is now explicitly **not** a reason to answer `blocked`, however many turns it
 has happened, because repetition is recoverable: the next turn can do something different. A
 turn that checks on work already in flight is **waiting**, not circling, and the judge is told
-so and told not to assume work did *not* happen off-screen.
+so. The digest and the pending-id list are the off-screen record. Anything not in the reply,
+the digest, or that list did not happen.
 
 ### The polling guard
 
@@ -455,6 +513,7 @@ quiet, because a heuristic that pauses a loop on a guess is worse than one that 
   continuation prompt (`↻ [continuing toward your standing goal — turn 3/20]`) and a message is
   only sent when the loop actually stops.
 - **A stalled or paused goal is not deleted.** Use `/goal clear` to drop it.
+- **An unanswered permission prompt is a host stall.** The plugin does not turn `ask` into `allow`.
 - The plugin runs once per OpenCode location. Only the instance owning a session's directory
   reacts to its turns, so a global install does not double-drive any one session.
 
