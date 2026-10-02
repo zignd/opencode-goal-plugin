@@ -1,6 +1,15 @@
 import { describe, test } from "node:test"
 import assert from "node:assert/strict"
-import { backoffSeconds, nextWaitedMs, outputPathOf, pendingBackground } from "../src/waiting.ts"
+import {
+  allowanceUsedMessage,
+  backoffSeconds,
+  countPendingAlive,
+  nextWaitedMs,
+  outputPathOf,
+  pendingBackground,
+  sessionBusy,
+  stillRunningMessage,
+} from "../src/waiting.ts"
 
 const launch = (id: string) => ({
   type: "assistant",
@@ -47,6 +56,44 @@ describe("pendingBackground", () => {
 
   test("fails open on shapes it does not recognise", () => {
     assert.deepEqual(pendingBackground([null, {}, { type: "assistant", content: [{ type: "tool" }] }]), [])
+  })
+
+  const child = (id: string, background = true) => ({
+    type: "assistant",
+    content: [
+      {
+        type: "tool",
+        state: {
+          input: { background },
+          content: [{ type: "text", text: `sessionID: ${id}` }],
+        },
+      },
+    ],
+  })
+  const subagent = (id: string, state = "completed") => ({
+    type: "synthetic",
+    text: `<subagent sessionID="${id}" state="${state}">`,
+  })
+
+  test("a child session with no completion notice stays pending", () => {
+    assert.deepEqual(pendingBackground([child("ses_abc")]), ["ses_abc"])
+  })
+
+  test("a completion notice clears a child session, including failed and killed", () => {
+    assert.deepEqual(pendingBackground([child("ses_abc"), subagent("ses_abc")]), [])
+    assert.deepEqual(pendingBackground([child("ses_bad"), subagent("ses_bad", "failed")]), [])
+    assert.deepEqual(pendingBackground([child("ses_dead"), subagent("ses_dead", "killed")]), [])
+  })
+
+  test("a finished shell does not clear an unfinished child session", () => {
+    assert.deepEqual(
+      pendingBackground([launch("sh_one"), child("ses_two"), notice("sh_one")]),
+      ["ses_two"],
+    )
+  })
+
+  test("a foreground subagent is ignored", () => {
+    assert.deepEqual(pendingBackground([child("ses_fg", false)]), [])
   })
 })
 
@@ -127,6 +174,67 @@ describe("outputPathOf", () => {
     }
     assert.equal(outputPathOf([message], "sh_a1"), "/tmp/x/sh_a1.out")
     assert.equal(outputPathOf([message], "sh_other"), undefined)
+  })
+})
+
+describe("countPendingAlive", () => {
+  const child = (id: string) => ({
+    type: "assistant",
+    content: [
+      {
+        type: "tool",
+        state: { input: { background: true }, content: [{ type: "text", text: `sessionID: ${id}` }] },
+      },
+    ],
+  })
+
+  test("a pending child session with no output path is not alive by the file check", async () => {
+    let fileCalls = 0
+    const quiet = await countPendingAlive([child("ses_abc")], {
+      fileOpen: async () => {
+        fileCalls++
+        return true
+      },
+      sessionBusy: async () => false,
+    })
+    assert.equal(quiet, 0)
+    assert.equal(fileCalls, 0)
+    const busy = await countPendingAlive([child("ses_abc")], {
+      fileOpen: async () => true,
+      sessionBusy: async (id) => id === "ses_abc",
+    })
+    assert.equal(busy, 1)
+  })
+
+  test("a shell with no output path is unknown, not alive", async () => {
+    let fileCalls = 0
+    const n = await countPendingAlive([launch("sh_abc123")], {
+      fileOpen: async () => {
+        fileCalls++
+        return true
+      },
+      sessionBusy: async () => true,
+    })
+    assert.equal(n, 0)
+    assert.equal(fileCalls, 0)
+  })
+})
+
+describe("sessionBusy", () => {
+  test("a session that has never gone idle is busy; a finished one is not", () => {
+    assert.equal(sessionBusy({ time: { updated: 10 } }), true)
+    assert.equal(sessionBusy({ outcome: "succeeded", time: { idle: 20, updated: 20 } }), false)
+    assert.equal(sessionBusy({ outcome: "succeeded", time: { idle: 20, updated: 30 } }), true)
+    assert.equal(sessionBusy(undefined), false)
+  })
+})
+
+describe("wait messages", () => {
+  test("name pending ids and never say do other work", () => {
+    for (const text of [allowanceUsedMessage(["sh_a", "ses_b"]), stillRunningMessage(1.5, ["ses_b"])]) {
+      assert.match(text, /ses_b/)
+      assert.doesNotMatch(text, /do other work/)
+    }
   })
 })
 
