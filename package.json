@@ -36,9 +36,9 @@
     "node": ">=22.18"
   },
   "scripts": {
-    "test": "node --test",
-    "test:watch": "node --test --watch",
-    "test:coverage": "node --test --experimental-test-coverage",
+    "test": "node --import ./scripts/load-typescript.js --test",
+    "test:watch": "node --import ./scripts/load-typescript.js --test --watch",
+    "test:coverage": "node --import ./scripts/load-typescript.js --test --experimental-test-coverage",
     "typecheck": "tsc -p tsconfig.json",
     "check": "npm run typecheck && npm test"
   },
