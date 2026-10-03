@@ -140,6 +140,178 @@ export function modelLabel(model: ModelRef | null): string {
   return `${model.providerID}/${model.id}${model.variant ? `#${model.variant}` : ""}`
 }
 
+export type SettingKey = "budget" | "stall" | "poll" | "quiet" | "judge"
+
+export const SETTING_KEYS: readonly SettingKey[] = ["budget", "stall", "poll", "quiet", "judge"]
+
+export function isSettingKey(value: string): value is SettingKey {
+  return (SETTING_KEYS as readonly string[]).includes(value)
+}
+
+/** The command lines shown under the values, in the window and in the transcript. */
+export const SETTING_COMMANDS = [
+  "/goal budget <n|unlimited|default>",
+  "/goal stall <n|default>",
+  "/goal poll <n|default>",
+  "/goal quiet <on|off|default>",
+  "/goal judge <provider/model[#variant]|default>",
+]
+
+export const SETTING_NOTES = [
+  "Session overrides last until this session ends. The config default is",
+  "whatever maxTurns, stallLimit, pollLimit, quiet and judgeModel are set to in",
+  "opencode.json. Panel and display are TUI-only; the rest work anywhere.",
+]
+
+const budgetText = (budget: Budget) => (budget === null ? "unlimited" : String(budget))
+
+export type SettingChoice = {
+  label: string
+  /** The same text a slash command would take. `default` clears the override. */
+  argument: string
+  current: boolean
+}
+
+export type SettingControl = {
+  key: SettingKey
+  label: string
+  value: string
+  source: "this session" | "config default"
+  hint: string
+  /** Free text goes through the host prompt. A plugin dialog receives no keys. */
+  editable: boolean
+  placeholder: string
+  /** What the prompt is prefilled with. Empty when there is nothing to edit. */
+  draft: string
+  choices: SettingChoice[]
+}
+
+export type SettingsForm = {
+  intro: string
+  controls: SettingControl[]
+  commands: string[]
+  notes: string[]
+}
+
+export type SettingsDefaults = {
+  maxTurns: Budget
+  stall: number
+  poll: number
+  quiet: boolean
+  judge: ModelRef | null
+}
+
+const sourceOf = (overridden: boolean): SettingControl["source"] =>
+  overridden ? "this session" : "config default"
+
+const choice = (label: string, argument: string, current = false): SettingChoice => ({
+  label,
+  argument,
+  current,
+})
+
+/**
+ * The clickable form for `/goal settings`. Choices are the same arguments the slash
+ * commands accept, so the window and the command line cannot disagree about what a
+ * click means. `default` is offered only when this session has overridden the value.
+ */
+export function settingsForm(state: Effective, defaults: SettingsDefaults): SettingsForm {
+  const budgetChoices: SettingChoice[] = []
+  if (typeof state.maxTurns === "number" && state.maxTurns > 1) {
+    budgetChoices.push(choice("-", String(state.maxTurns - 1)))
+  }
+  if (typeof state.maxTurns === "number") {
+    budgetChoices.push(choice("+", String(state.maxTurns + 1)))
+  }
+  for (const preset of [10, 20, 40]) {
+    budgetChoices.push(choice(String(preset), String(preset), state.maxTurns === preset))
+  }
+  budgetChoices.push(choice("unlimited", "unlimited", state.maxTurns === null))
+  if (state.overridden.maxTurns) {
+    budgetChoices.push(choice(`default (${budgetText(defaults.maxTurns)})`, "default"))
+  }
+
+  const countChoices = (current: number, overridden: boolean, fallback: number): SettingChoice[] => {
+    const choices: SettingChoice[] = []
+    if (current > 1) choices.push(choice("-", String(current - 1)))
+    choices.push(choice("+", String(current + 1)))
+    if (overridden) choices.push(choice(`default (${fallback})`, "default"))
+    return choices
+  }
+
+  return {
+    intro:
+      "Click a control to change it for this session. [type…] opens a prompt, because this window does not take keys.",
+    controls: [
+      {
+        key: "budget",
+        label: "Turn budget",
+        value: budgetText(state.maxTurns),
+        source: sourceOf(state.overridden.maxTurns),
+        hint: "Turns before the loop pauses. Unlimited stops only on the judge and the guards.",
+        editable: true,
+        placeholder: "20, unlimited, or default",
+        draft: budgetText(state.maxTurns),
+        choices: budgetChoices,
+      },
+      {
+        key: "stall",
+        label: "Stall limit",
+        value: `${state.stall} turns with no tools`,
+        source: sourceOf(state.overridden.stall),
+        hint: "Turns with no tool calls before the loop gives up.",
+        editable: true,
+        placeholder: "a whole number, or default",
+        draft: String(state.stall),
+        choices: countChoices(state.stall, state.overridden.stall, defaults.stall),
+      },
+      {
+        key: "poll",
+        label: "Poll limit",
+        value: `${state.poll} unchanged observations`,
+        source: sourceOf(state.overridden.poll),
+        hint: "Turns re-reading an unchanged result before the loop calls it polling.",
+        editable: true,
+        placeholder: "a whole number, or default",
+        draft: String(state.poll),
+        choices: countChoices(state.poll, state.overridden.poll, defaults.poll),
+      },
+      {
+        key: "quiet",
+        label: "Quiet mode",
+        value: state.quiet ? "on" : "off",
+        source: sourceOf(state.overridden.quiet),
+        hint: "On: the panel replaces the loop's transcript notices.",
+        editable: false,
+        placeholder: "on, off, or default",
+        draft: state.quiet ? "on" : "off",
+        choices: [
+          choice("on", "on", state.quiet),
+          choice("off", "off", !state.quiet),
+          ...(state.overridden.quiet
+            ? [choice(`default (${defaults.quiet ? "on" : "off"})`, "default")]
+            : []),
+        ],
+      },
+      {
+        key: "judge",
+        label: "Judge model",
+        value: modelLabel(state.judge),
+        source: sourceOf(state.overridden.judge),
+        hint: "The model that decides done, blocked, or continue.",
+        editable: true,
+        placeholder: "provider/model or provider/model#variant",
+        draft: state.judge ? modelLabel(state.judge) : "",
+        choices: state.overridden.judge
+          ? [choice(`default (${modelLabel(defaults.judge)})`, "default")]
+          : [],
+      },
+    ],
+    commands: [...SETTING_COMMANDS],
+    notes: [...SETTING_NOTES],
+  }
+}
+
 /** The `/goal settings` summary. */
 export function renderSettings(state: Effective): string {
   const mark = (overridden: boolean) => (overridden ? "this session" : "config default")
@@ -147,23 +319,16 @@ export function renderSettings(state: Effective): string {
   // rule is inlined here so this module needs no runtime import of it. The
   // rendered text is pinned in settings.test.ts, so the two cannot drift apart
   // unnoticed.
-  const budgetText = state.maxTurns === null ? "unlimited" : String(state.maxTurns)
   return [
-    `Turn budget   ${budgetText}   (${mark(state.overridden.maxTurns)})`,
+    `Turn budget   ${budgetText(state.maxTurns)}   (${mark(state.overridden.maxTurns)})`,
     `Stall limit   ${state.stall} turns with no tools   (${mark(state.overridden.stall)})`,
     `Poll limit    ${state.poll} unchanged observations   (${mark(state.overridden.poll)})`,
     `Quiet mode    ${state.quiet ? "on" : "off"}   (${mark(state.overridden.quiet)})`,
     `Judge model   ${modelLabel(state.judge)}   (${mark(state.overridden.judge)})`,
     ``,
     `Change any of these for this session:`,
-    `  /goal budget <n|unlimited|default>`,
-    `  /goal stall <n|default>`,
-    `  /goal poll <n|default>`,
-    `  /goal quiet <on|off|default>`,
-    `  /goal judge <provider/model[#variant]|default>`,
+    ...SETTING_COMMANDS.map((command) => `  ${command}`),
     ``,
-    `Session overrides last until this session ends. The config default is`,
-    `whatever maxTurns, stallLimit, pollLimit, quiet and judgeModel are set to in`,
-    `opencode.json. Panel and display are TUI-only; the rest work anywhere.`,
+    ...SETTING_NOTES,
   ].join("\n")
 }

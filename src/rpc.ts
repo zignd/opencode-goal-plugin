@@ -14,6 +14,8 @@ import { Rpc } from "@opencode/plugin/rpc"
  * values, so the payload validates the same way whichever way it was built.
  */
 
+import type { Round } from "./rounds.js"
+
 export type GoalStatus = "active" | "paused" | "done" | "blocked"
 
 /**
@@ -22,33 +24,7 @@ export type GoalStatus = "active" | "paused" | "done" | "blocked"
  * the server plugin, and importing it from the TUI would evaluate a whole
  * second plugin in the client process.
  */
-export const HELP_TEXT = `/goal <text>          set the goal and start working
-/goal status          report the goal, its state, turns used, last judge reason
-/goal pause           stop auto-continuation, keep the goal
-/goal resume          resume with a fresh turn budget
-/goal clear           drop the goal
-/goal panel           open or close the panel        (TUI)
-/goal display         where the goal is shown        (TUI)
-/goal help            this message
-/goal budget            report the turn budget
-/goal budget <n>        a whole number of turns
-/goal budget inf        no turn limit (also: unlim, unlimited, none, ∞)
-/goal budget default    back to the configured maxTurns
-/goal stall <n>        turns with no tools before the loop gives up
-/goal poll <n>         turns re-reading an unchanged result before it counts as polling
-/goal quiet <on|off>   whether the panel replaces the transcript notices
-/goal judge <model>    provider/model[#variant] used to judge each turn
-/goal settings         show every setting, and where it came from
-
-Completion contract — lines the judge uses to decide "done":
-  verify: / verified by:    the command or artifact that proves it
-  verify-cmd:               a cheap re-read the plugin runs after a first-pass done
-  constraints: / preserve:  what must not change
-  scope: / boundaries:      what is in scope
-  outcome:                  the end state that must be true
-  stop when:                when to stop and ask you
-
-The loop stops on: done, judged unachievable, stalled, repeated, or out of turns.`
+export { HELP_SECTIONS, HELP_TEXT } from "./help.js"
 
 export type GoalView = {
   sessionID: string
@@ -67,6 +43,11 @@ export type GoalView = {
   /** The goal's own proof condition, or "". */
   verification: string
   updatedAt: number
+  /** When the running turn's prompt was sent, or 0 when unknown. Optional: older servers omit it. */
+  turnStartedAt?: number
+  /** Settled turns, newest last. Optional for the same reason. */
+  rounds?: Round[]
+  roundsDropped?: number
 }
 
 const state = {
@@ -83,6 +64,27 @@ const state = {
     reason: { type: "string" },
     verification: { type: "string" },
     updatedAt: { type: "number" },
+    turnStartedAt: { type: "number" },
+    roundsDropped: { type: "number" },
+    rounds: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          n: { type: "number" },
+          startedAt: { type: "number" },
+          endedAt: { type: "number" },
+          ms: { type: "number" },
+          toolCalls: { type: "number" },
+          outcome: { type: "string" },
+          reason: { type: "string" },
+          achieved: { type: "string" },
+          fallback: { type: "boolean" },
+        },
+        required: ["n", "startedAt", "endedAt", "ms", "toolCalls", "outcome", "reason", "achieved"],
+        additionalProperties: false,
+      },
+    },
   },
   required: [
     "sessionID",
@@ -114,6 +116,53 @@ const sessionInput = {
 } as const
 
 const empty = { type: "object", properties: {}, additionalProperties: false } as const
+
+const settingChoice = {
+  type: "object",
+  properties: {
+    label: { type: "string" },
+    argument: { type: "string" },
+    current: { type: "boolean" },
+  },
+  required: ["label", "argument", "current"],
+  additionalProperties: false,
+} as const
+
+const settingControl = {
+  type: "object",
+  properties: {
+    key: { type: "string", enum: ["budget", "stall", "poll", "quiet", "judge"] },
+    label: { type: "string" },
+    value: { type: "string" },
+    source: { type: "string" },
+    hint: { type: "string" },
+    editable: { type: "boolean" },
+    placeholder: { type: "string" },
+    draft: { type: "string" },
+    choices: { type: "array", items: settingChoice },
+  },
+  required: ["key", "label", "value", "source", "hint", "editable", "placeholder", "draft", "choices"],
+  additionalProperties: false,
+} as const
+
+const settingsFormSchema = {
+  type: "object",
+  properties: {
+    intro: { type: "string" },
+    controls: { type: "array", items: settingControl },
+    commands: { type: "array", items: { type: "string" } },
+    notes: { type: "array", items: { type: "string" } },
+  },
+  required: ["intro", "controls", "commands", "notes"],
+  additionalProperties: false,
+} as const
+
+const settingsPayload = {
+  type: "object",
+  properties: { text: { type: "string" }, form: settingsFormSchema },
+  required: ["text", "form"],
+  additionalProperties: false,
+} as const
 
 export const Goal = Rpc.define({
   id: "goal",
@@ -150,6 +199,40 @@ export const Goal = Rpc.define({
       },
       output: empty,
     },
+    /**
+     * The clickable `/goal settings` form. The server owns the values; the TUI
+     * only renders this and sends changes back through `configure`.
+     */
+    readSettings: { input: sessionInput, output: settingsPayload },
+    /**
+     * Apply one setting the same way the slash command would. `argument` is the
+     * text after `/goal <key>`, including `default`.
+     */
+    configure: {
+      input: {
+        type: "object",
+        properties: {
+          sessionID: { type: "string" },
+          key: { type: "string", enum: ["budget", "stall", "poll", "quiet", "judge"] },
+          argument: { type: "string" },
+        },
+        required: ["sessionID", "key", "argument"],
+        additionalProperties: false,
+      },
+      output: {
+        type: "object",
+        properties: {
+          ok: { type: "boolean" },
+          title: { type: "string" },
+          message: { type: "string" },
+          variant: { type: "string" },
+          text: { type: "string" },
+          form: settingsFormSchema,
+        },
+        required: ["ok", "title", "message", "text", "form"],
+        additionalProperties: false,
+      },
+    },
   },
   events: {
     /** Emitted whenever the server writes goal state. `state` is null once cleared. */
@@ -183,6 +266,15 @@ export const Goal = Rpc.define({
      * the transcript where it would cost a model call.
      */
     help: { schema: empty },
+    /** `/goal rounds`. The TUI already holds the rounds in the view, so this only asks it to open the window. */
+    rounds: {
+      schema: {
+        type: "object",
+        properties: { sessionID: { type: "string" } },
+        required: ["sessionID"],
+        additionalProperties: false,
+      },
+    },
     /**
      * A short confirmation or complaint for a subcommand the user just ran.
      * Answering these in the transcript would mean a synthetic message, which is
@@ -202,13 +294,17 @@ export const Goal = Rpc.define({
       },
     },
     /**
-     * `/goal settings`. The server renders the summary, because it is the side
-     * that knows the values, and the TUI only displays it in a dialog.
+     * `/goal settings`. `text` is the transcript fallback. `form` is the clickable
+     * view; an older server omits it and the TUI falls back to the text.
      */
     settings: {
       schema: {
         type: "object",
-        properties: { text: { type: "string" } },
+        properties: {
+          text: { type: "string" },
+          sessionID: { type: "string" },
+          form: settingsFormSchema,
+        },
         required: ["text"],
         additionalProperties: false,
       },

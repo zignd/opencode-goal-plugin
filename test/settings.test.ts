@@ -17,6 +17,8 @@ import {
   parseModel,
   renderSettings,
   resolve,
+  SETTING_COMMANDS,
+  settingsForm,
   type Overrides,
 } from "../src/settings.ts"
 
@@ -262,5 +264,74 @@ describe("renderSettings", () => {
   test("marks all five rows as the config default when nothing is set", () => {
     assert.equal(untouched.match(/\(config default\)/g)?.length, 5)
     assert.equal(untouched.match(/\(this session\)/g), null)
+  })
+})
+
+describe("settingsForm", () => {
+  const defaults = { ...OPTIONS }
+  const control = (state: ReturnType<typeof resolve>, key: string) => {
+    const found = settingsForm(state, defaults).controls.find((row) => row.key === key)
+    assert.ok(found, key)
+    return found
+  }
+  const args = (row: { choices: { label: string; argument: string; current: boolean }[] }) =>
+    Object.fromEntries(row.choices.map((item) => [item.label, item.argument]))
+
+  test("a finite budget steps by one, offers presets, and can be made unlimited", () => {
+    const row = control(resolve(OPTIONS, NO_OVERRIDES), "budget")
+    assert.equal(row.value, "20")
+    assert.equal(row.source, "config default")
+    assert.equal(args(row)["-"], "19")
+    assert.equal(args(row)["+"], "21")
+    assert.equal(args(row)["10"], "10")
+    assert.equal(row.choices.find((item) => item.label === "20")?.current, true)
+    assert.equal(args(row).unlimited, "unlimited")
+    assert.equal(row.choices.some((item) => item.argument === "default"), false)
+    assert.equal(row.draft, "20")
+  })
+
+  test("an unlimited budget has no stepper, and an override can be cleared", () => {
+    const row = control(resolve(OPTIONS, { ...NO_OVERRIDES, maxTurns: null }), "budget")
+    assert.equal(row.value, "unlimited")
+    assert.equal(row.source, "this session")
+    assert.equal(row.choices.some((item) => item.label === "-" || item.label === "+"), false)
+    assert.equal(row.choices.find((item) => item.label === "unlimited")?.current, true)
+    assert.equal(args(row)["default (20)"], "default")
+  })
+
+  test("a count of 1 cannot step below 1", () => {
+    const row = control(resolve(OPTIONS, { ...NO_OVERRIDES, stall: 1 }), "stall")
+    assert.equal(row.choices.some((item) => item.label === "-"), false)
+    assert.equal(args(row)["+"], "2")
+    assert.equal(args(row)["default (2)"], "default")
+  })
+
+  test("quiet marks the value in force, and toggles with on and off", () => {
+    const row = control(resolve(OPTIONS, { ...NO_OVERRIDES, quiet: true }), "quiet")
+    assert.equal(row.value, "on")
+    assert.equal(row.editable, false)
+    assert.equal(row.choices.find((item) => item.argument === "on")?.current, true)
+    assert.equal(row.choices.find((item) => item.argument === "off")?.current, false)
+    assert.equal(args(row)["default (off)"], "default")
+  })
+
+  test("the judge prompt is prefilled only when a model is set", () => {
+    const unset = control(resolve(OPTIONS, NO_OVERRIDES), "judge")
+    assert.equal(unset.draft, "")
+    assert.equal(unset.choices.length, 0)
+    const set = control(
+      resolve(OPTIONS, { ...NO_OVERRIDES, judge: { providerID: "openai", id: "gpt-5", variant: "high" } }),
+      "judge",
+    )
+    assert.equal(set.draft, "openai/gpt-5#high")
+    assert.equal(args(set)["default (the session's model)"], "default")
+  })
+
+  test("keeps the command instructions, and says the window is clicked rather than typed in", () => {
+    const form = settingsForm(resolve(OPTIONS, NO_OVERRIDES), defaults)
+    assert.match(form.intro, /Click a control/)
+    assert.match(form.intro, /does not take keys/)
+    for (const command of SETTING_COMMANDS) assert.ok(form.commands.includes(command))
+    assert.match(form.notes.join("\n"), /TUI-only/)
   })
 })

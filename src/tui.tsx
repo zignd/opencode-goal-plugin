@@ -1,6 +1,9 @@
 import { Plugin } from "@opencode/plugin/tui"
 import { createEffect, createSignal, onCleanup, Show } from "solid-js"
-import { Goal, HELP_TEXT as HELP, type GoalView } from "./rpc.js"
+import { Goal, HELP_SECTIONS, type GoalView } from "./rpc.js"
+import { formatDuration, glyph, sectionsFromText, totalMs } from "./rounds.js"
+import { Divider, Heading, outcomeColour, RoundsView, SectionedView, SettingsView } from "./windows.js"
+import type { SettingControl, SettingsForm } from "./settings.js"
 import { formatTurns } from "./budget.js"
 import { listen } from "./listen.js"
 import {
@@ -50,6 +53,9 @@ type GetResult = { sessionID: string; state: GoalView | null }
  */
 const asChanged = (data: unknown) => data as Changed
 const asGet = (data: unknown) => data as GetResult
+const asSettings = (data: unknown) => data as { text: string; form: SettingsForm }
+const asConfigure = (data: unknown) =>
+  data as { ok: boolean; title: string; message: string; text: string; form: SettingsForm }
 
 export default Plugin.define({
   id: "goal.tui",
@@ -261,7 +267,7 @@ export default Plugin.define({
       }
     }, 5000)
 
-    type EventName = "changed" | "panel" | "display" | "notice" | "settings" | "help"
+    type EventName = "changed" | "panel" | "display" | "notice" | "settings" | "help" | "rounds"
     type RpcEvent = { readonly data: unknown; readonly location?: { readonly directory?: string } }
 
     /**
@@ -413,6 +419,13 @@ export default Plugin.define({
     }
 
     const Body = (props: { view: GoalView; width?: number }) => {
+      // Ticks only while a round is running, so a finished goal does not repaint every second.
+      const [now, setNow] = createSignal(Date.now())
+      const tick = setInterval(() => {
+        if (props.view.status === "active") setNow(Date.now())
+      }, 1000)
+      onCleanup(() => clearInterval(tick))
+
       const status = () => {
         switch (props.view.status) {
           case "active":
@@ -426,58 +439,103 @@ export default Plugin.define({
         }
       }
       const unlimited = () => props.view.maxTurns === null
+      const width = () => Math.max(12, (props.width ?? 44) - 4)
       // A bar needs a ceiling to fill towards, so an unlimited goal gets the
       // turn count alone rather than a meaningless full bar.
       const bar = () => {
-        const width = Math.max(8, Math.min(28, (props.width ?? 44) - 16))
+        const size = Math.max(8, Math.min(28, (props.width ?? 44) - 16))
         const max = props.view.maxTurns
         if (max === null) return ""
-        const filled = Math.min(width, Math.round((props.view.turns / max) * width))
-        return "█".repeat(filled) + "░".repeat(width - filled) + " "
+        const filled = Math.min(size, Math.round((props.view.turns / max) * size))
+        return "█".repeat(filled) + "░".repeat(size - filled) + " "
       }
       // `turns` counts continuations, so the opening turn is not in it. Adding
       // one keeps "0 turns" from reading as "nothing happened" on a goal that
       // succeeded immediately.
-      const turnsUsed = props.view.turns + 1
+      const turnsUsed = () => props.view.turns + 1
+      const rounds = () => props.view.rounds ?? []
+      const last = () => rounds()[rounds().length - 1]
+      const started = () => props.view.turnStartedAt ?? 0
+      const active = () => props.view.status === "active"
+
       return (
-        <>
-          <text fg={status().colour}>● goal {status().label}</text>
-          <text fg={palette.base}>{props.view.goal}</text>
-          <Show when={props.view.verification}>
-            <text fg={palette.muted}>proof: {props.view.verification}</text>
-          </Show>
-          <Show
-            when={props.view.status === "active"}
-            fallback={
-              <Show
-                when={unlimited()}
-                fallback={
-                  <text fg={palette.muted}>
-                    finished after {turnsUsed} of {props.view.maxTurns} turns
-                  </text>
-                }
-              >
-                <text fg={palette.muted}>finished after {turnsUsed} turns, no limit set</text>
+        <scrollbox maxHeight={Math.max(6, context.renderer.terminalHeight - 8)}>
+          <box flexDirection="column">
+            <text fg={status().colour}>● goal {status().label}</text>
+            <Divider palette={palette} width={width()} />
+            <Heading palette={palette} text="goal" />
+            <text fg={palette.base}>{props.view.goal}</text>
+            <Divider palette={palette} width={width()} />
+            <Heading palette={palette} text={active() ? "this round" : "result"} />
+            <Show
+              when={active()}
+              fallback={
+                <>
+                  <Show
+                    when={unlimited()}
+                    fallback={
+                      <text fg={palette.muted}>
+                        finished after {turnsUsed()} of {props.view.maxTurns} turns
+                      </text>
+                    }
+                  >
+                    <text fg={palette.muted}>finished after {turnsUsed()} turns, no limit set</text>
+                  </Show>
+                  <Show when={rounds().length > 0}>
+                    <text fg={palette.muted}>
+                      {formatDuration(totalMs(rounds()))} across {rounds().length} {rounds().length === 1 ? "round" : "rounds"}
+                    </text>
+                  </Show>
+                </>
+              }
+            >
+              <text fg={palette.muted}>
+                {bar()}turn {formatTurns(props.view.turns, props.view.maxTurns)}
+              </text>
+              <Show when={started() > 0}>
+                <text fg={palette.muted}>running for {formatDuration(now() - started())}</text>
               </Show>
-            }
-          >
-            <text fg={palette.muted}>
-              {bar()}turn {formatTurns(props.view.turns, props.view.maxTurns)}
-            </text>
-            <Show when={unlimited()}>
-              <text fg={palette.warning}>no turn limit — the judge and guards are the only stops</text>
+              <Show when={unlimited()}>
+                <text fg={palette.warning}>no turn limit — the judge and guards are the only stops</text>
+              </Show>
             </Show>
-          </Show>
-          <Show when={props.view.stalled > 0}>
-            <text fg={palette.warning}>stalled: {props.view.stalled} turns with no tools</text>
-          </Show>
-          <Show when={props.view.repeats > 0}>
-            <text fg={palette.warning}>repeating: {props.view.repeats} identical replies</text>
-          </Show>
-          <Show when={props.view.reason}>
-            <text fg={palette.muted}>{props.view.reason}</text>
-          </Show>
-        </>
+            <Show when={last()}>
+              {(round) => (
+                <>
+                  <Divider palette={palette} width={width()} />
+                  <Heading palette={palette} text="last round" />
+                  <text fg={outcomeColour(palette, round().outcome)}>
+                    #{round().n} {glyph(round().outcome)} {formatDuration(round().ms)}
+                  </text>
+                  <text fg={palette.base}>{round().achieved}</text>
+                  <text fg={palette.warning} onMouseDown={() => openRounds(props.view.sessionID)}>
+                    all rounds ▸
+                  </text>
+                </>
+              )}
+            </Show>
+            <Show when={props.view.verification}>
+              <Divider palette={palette} width={width()} />
+              <Heading palette={palette} text="proof" />
+              <text fg={palette.base}>{props.view.verification}</text>
+            </Show>
+            <Show when={props.view.stalled > 0 || props.view.repeats > 0}>
+              <Divider palette={palette} width={width()} />
+              <Heading palette={palette} text="warnings" />
+              <Show when={props.view.stalled > 0}>
+                <text fg={palette.warning}>stalled: {props.view.stalled} turns with no tools</text>
+              </Show>
+              <Show when={props.view.repeats > 0}>
+                <text fg={palette.warning}>repeating: {props.view.repeats} identical replies</text>
+              </Show>
+            </Show>
+            <Show when={props.view.reason}>
+              <Divider palette={palette} width={width()} />
+              <Heading palette={palette} text="judge" />
+              <text fg={palette.muted}>{props.view.reason}</text>
+            </Show>
+          </box>
+        </scrollbox>
       )
     }
 
@@ -506,6 +564,49 @@ export default Plugin.define({
         </box>
       )
     }
+
+    /**
+     * Windows. The host's own `dialog.alert` is plain text with no scrolling, which is why help
+     * and settings could not be read. `dialog.show` takes our own content. `set` is called on
+     * both sides of `show` because the docs do not say which order the host honours.
+     */
+    const windowHeight = () => Math.max(8, context.renderer.terminalHeight - 14)
+    const closeWindow = () => {
+      try {
+        context.ui.dialog.clear()
+      } catch {
+        // Already closed.
+      }
+    }
+    const showWindow = (render: () => any) => {
+      try {
+        context.ui.dialog.set({ size: "xlarge", centered: true })
+        context.ui.dialog.show(render)
+        context.ui.dialog.set({ size: "xlarge", centered: true })
+      } catch {
+        context.ui.toast.show({ title: "Goal plugin", message: "Could not open the window.", variant: "error", duration: 4000 })
+      }
+    }
+    const openRounds = (sessionID: string) =>
+      showWindow(() => (
+        <RoundsView
+          palette={palette}
+          rounds={() => states()[sessionID]?.rounds ?? []}
+          dropped={() => states()[sessionID]?.roundsDropped ?? 0}
+          maxHeight={windowHeight()}
+          onClose={closeWindow}
+        />
+      ))
+
+    guard("rounds request", () =>
+      on("rounds", async (event) => {
+        if (!isLocal(event.location?.directory)) return
+        const { sessionID } = event.data as { sessionID?: string }
+        if (!sessionID) return
+        await refresh(sessionID)
+        openRounds(sessionID)
+      }),
+    )
 
     guard("panel request", () =>
       on("panel", (event) => {
@@ -575,32 +676,102 @@ export default Plugin.define({
       }),
     )
 
+    /**
+     * The settings window writes through the server, the same path as the slash commands.
+     * Signals live for as long as the dialog's render closure does. A second open replaces
+     * the dialog and drops the previous ones.
+     */
+    const openSettings = (sessionID: string, initial: SettingsForm) => {
+      const [form, setForm] = createSignal(initial)
+      const [error, setError] = createSignal("")
+      let saving = false
+      const apply = async (key: SettingControl["key"], argument: string) => {
+        if (saving) return
+        saving = true
+        setError("")
+        try {
+          const result = asConfigure(await rpc.configure({ sessionID, key, argument }))
+          setForm(result.form)
+          if (!result.ok) setError(result.message)
+        } catch {
+          setError("Could not save that setting.")
+        } finally {
+          saving = false
+        }
+      }
+      const edit = async (control: SettingControl) => {
+        closeWindow()
+        let typed: string | undefined
+        try {
+          typed = await context.ui.dialog.prompt({
+            title: control.label,
+            description: control.hint,
+            placeholder: control.placeholder,
+            value: control.draft,
+          })
+        } catch {
+          typed = undefined
+        }
+        if (typed !== undefined && typed.trim()) await apply(control.key, typed.trim())
+        show()
+      }
+      const show = () =>
+        showWindow(() => (
+          <SettingsView
+            palette={palette}
+            form={form}
+            error={error}
+            maxHeight={windowHeight()}
+            onClose={closeWindow}
+            onChoose={(key, argument) => void apply(key, argument)}
+            onEdit={(control) => void edit(control)}
+          />
+        ))
+      show()
+    }
+
     guard("settings request", () =>
       on("settings", async (event) => {
         if (!isLocal(event.location?.directory)) return
-        try {
-          // The server owns the values; the TUI just renders them. `dialog.alert`
-          // rather than a custom dialog, because plugin dialogs receive no key
-          // input in this host — see the note by the display picker.
-          const text = (event.data as { text?: string }).text
-          if (!text) return
-          context.ui.dialog.set({ size: "large", centered: true })
-          await context.ui.dialog.alert({ title: "/goal settings", message: text })
-        } catch {
-          // No dialog available.
+        const data = event.data as { text?: string; sessionID?: string; form?: SettingsForm }
+        if (data.sessionID && data.form) {
+          openSettings(data.sessionID, data.form)
+          return
         }
+        if (data.sessionID) {
+          try {
+            openSettings(data.sessionID, asSettings(await rpc.readSettings({ sessionID: data.sessionID })).form)
+            return
+          } catch {
+            // The text below is the fallback when the server has no form to give.
+          }
+        }
+        if (!data.text) return
+        const sections = sectionsFromText(data.text, ["Current values", "Change for this session", "Notes"])
+        showWindow(() => (
+          <SectionedView
+            palette={palette}
+            title="/goal settings"
+            sections={sections}
+            maxHeight={windowHeight()}
+            onClose={closeWindow}
+          />
+        ))
       }),
     )
 
     guard("help request", () =>
-      on("help", async (event) => {
+      on("help", (event) => {
         if (!isLocal(event.location?.directory)) return
-        try {
-          context.ui.dialog.set({ size: "large", centered: true })
-          await context.ui.dialog.alert({ title: "/goal", message: HELP })
-        } catch {
-          // No dialog available.
-        }
+        showWindow(() => (
+          <SectionedView
+            palette={palette}
+            title="/goal help"
+            sections={HELP_SECTIONS}
+            maxHeight={windowHeight()}
+            onClose={closeWindow}
+          />
+        ))
       }),
     )
 

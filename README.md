@@ -151,7 +151,7 @@ until the session ends — it never rewrites your config.
 | `/goal poll <n\|default>` | `pollLimit` | Turns reading the **same unchanged result** before calling it polling |
 | `/goal quiet <on\|off\|default>` | `quiet` | When on, the panel replaces the loop's transcript notices |
 | `/goal judge <provider/model[#variant]\|default>` | `judgeModel` | Cheaper and sharper models judge better and cost less |
-| `/goal settings` | — | Shows all four, and whether each is a session override or the config default |
+| `/goal settings` | — | Change any of them in a window, and see whether each is a session override or the config default |
 
 ### What a subcommand reply costs
 
@@ -177,7 +177,10 @@ reads as a broken one. They also print more than fits in a toast. Set `quiet: tr
 transcript notices are the part you want gone, though that covers the loop's own reporting rather
 than these replies.
 
-`/goal settings` opens a dialog in the TUI and prints to the transcript elsewhere:
+`/goal settings` opens a window in the TUI. Each row is the current value, where it came from, and
+clickable controls (`[-]`, `[+]`, presets, `[unlimited]`, `[on]` / `[off]`, `[default]`). `[type…]`
+opens a prompt for a number or a model, because that window does not take keys. The command lines
+stay at the bottom of the window. With no TUI it prints to the transcript:
 
 ```text
 Turn budget   20   (config default)
@@ -259,7 +262,7 @@ drives that session's loop.
 | `/goal stall <n>` | Turns with no tool calls before the loop gives up. |
 | `/goal quiet <on\|off>` | Whether the panel replaces the loop's transcript notices. |
 | `/goal judge <model>` | `provider/model[#variant]` used to judge each turn. |
-| `/goal settings` | Every setting and where its value came from. |
+| `/goal settings` | Change each setting in a window, and see where its value came from. |
 
 ### The session panel (TUI)
 
@@ -418,6 +421,39 @@ Installing the plugin puts the tools on the turn, not the contract. Two things c
 
 - The `goal-contract` skill. Its description is on the skill list every turn, and the agent loads the body when you ask for a goal. The body is `skills/goal-contract.md`, and a test checks it names every field the parser accepts.
 - `/draft-goal <outcome>`. It does not depend on the agent choosing the skill: it submits a prompt that carries the contract and asks for the `/goal` text, without starting the work.
+
+## Rounds, the panel, and the windows
+
+A **round** is one turn, timed from the moment the plugin sent the prompt to the moment the turn
+settled. The judge's own call and the backoff sleep before a continuation are not in it. A goal
+that began before rounds were recorded shows `0ms` for its first round rather than a guess.
+
+Each round keeps its number, duration, tool-call count, the judge's one-line reason, and
+`achieved`: one or two sentences the judge writes about what that turn concretely did. If the
+judge leaves it out, the round says so (`No summary from the judge. 3 tool calls ran this round.`)
+and does not invent one. The newest 40 rounds are kept, and the number dropped is shown.
+
+- **Side panel.** Sections with dividers: status, goal, this round (turn bar and a live
+  `running for` timer), last round (what it achieved and how long it took), proof, warnings, and
+  the judge's reason. The body is a scroll area, so a long goal no longer runs off the bottom.
+  `all rounds ▸` opens the rounds window.
+- **`/goal rounds`.** A large window with one collapsible section per round, newest first. Click a
+  header to open it, or use `[expand all]` and `[collapse all]`. With no TUI it prints a text report.
+- **`/goal help`.** The same scrolling, sectioned window. Scroll with the mouse wheel and close
+  with `[close]`.
+- **`/goal settings`.** That window, with a control on each setting. A click writes the same
+  override as the slash command, including onto a goal that is already running. The command list
+  and the notes stay at the bottom. `[type…]` uses the host prompt.
+
+What is and is not verified: the round bookkeeping, the formatting, the help sections, the settings
+controls (what a click sends), and the presence matching are unit-tested. The window layout, the
+scrollbars, and click handling use the host's `scrollbox` and `dialog.show` and have only been
+type-checked, not looked at in a terminal. A plugin dialog receives no plugin key bindings in this
+host, so the controls are mouse driven. Typing a custom value uses the host prompt, which does
+take keys.
+
+If `/goal help` or `/goal settings` ever lands in the transcript as a prompt, the server logged
+`[goal] no TUI is present for <directory>` with the directories it did see, in `opencode.log`.
 
 ## Tools the agent can call
 

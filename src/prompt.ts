@@ -100,7 +100,9 @@ ${input.response}
 </agent's last response>
 
 Reply with exactly one line of strict JSON and nothing else:
-{"verdict": "done" | "blocked" | "continue", "reason": "<one sentence>"}
+{"verdict": "done" | "blocked" | "continue", "reason": "<one sentence>", "achieved": "<one or two sentences>"}
+
+"achieved" says what THIS turn concretely did: files changed, commands run and what they printed. It is never what remains to be done, and never a restatement of the goal. Leave it "" when the turn did nothing.
 
 Rules:
 

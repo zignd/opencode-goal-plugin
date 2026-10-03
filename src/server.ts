@@ -3,6 +3,9 @@ import { Plugin } from "@opencode/plugin"
 import { Goal, HELP_TEXT, type GoalView } from "./rpc.js"
 import { observationOf } from "./observation.js"
 import { capText } from "./cap.js"
+import { formatDuration, roundsReport, withRound, type Round } from "./rounds.js"
+import { parseVerdict } from "./verdict.js"
+import { presentFor, type PresenceRecord } from "./presence.js"
 import { parseGoal, renderContract, type Contract } from "./contract.js"
 import { appendEvidence, emptyDigest, renderEvidence, withPending, type EvidenceDigest } from "./evidence.js"
 import { goalBlocked, goalEvidence, goalPending, heldByTool } from "./goal-tools.js"
@@ -44,10 +47,13 @@ import {
   parseCount,
   parseFlag,
   parseModel,
+  isSettingKey,
   renderSettings,
   resolve,
+  settingsForm,
   type ModelRef,
   type Overrides,
+  type SettingKey,
 } from "./settings.js"
 // Pure, no JSX, so the server can share the parser with the TUI.
 import { parseDisplayArgument } from "./display.js"
@@ -117,6 +123,11 @@ type GoalState = {
   reason?: string
   /** Set when `goal_blocked` paused the loop. A later judge verdict must not clear it. */
   pausedBy?: "tool"
+  /** When the plugin sent the prompt for the turn now running. Judge time is not in a round. */
+  turnStartedAt?: number
+  /** One entry per settled turn, newest kept, with how many fell off the front. */
+  rounds?: Round[]
+  roundsDropped?: number
   /** Last verify-cmd results and the ids still pending. Not cleared when a reply forgets them. */
   evidence?: EvidenceDigest
 }
@@ -156,8 +167,12 @@ function toView(state: GoalState): Omit<GoalView, "sessionID"> {
     reason: state.reason ?? "",
     verification: state.contract.verification || state.contract.verifyCmd?.join("\n") || "",
     updatedAt: Date.now(),
+    turnStartedAt: state.turnStartedAt ?? 0,
+    rounds: state.rounds ?? [],
+    roundsDropped: state.roundsDropped ?? 0,
   }
 }
+
 
 function statusReport(state: GoalState | undefined): string {
   if (!state) return "No active goal. Set one with /goal <what you want accomplished>."
@@ -166,6 +181,8 @@ function statusReport(state: GoalState | undefined): string {
     `${icon} Goal (${state.status}) — ${formatTurns(state.turns, state.maxTurns)} turns used`,
     `  ${state.goal}`,
   ]
+  const last = state.rounds?.[state.rounds.length - 1]
+  if (last) lines.push(`  Last round: #${last.n}, ${formatDuration(last.ms)} — ${last.achieved}`)
   if (state.pausedBy === "tool" && state.reason) lines.push(`  Paused: ${state.reason}`)
   else if (state.reason) lines.push(`  Last judge: ${state.reason}`)
   // "running" is also the word for a goal no judge has ever seen, so name that case.
@@ -220,19 +237,6 @@ async function lastAssistantTurn(
   }
 }
 
-function parseVerdict(raw: string): { verdict: Verdict; reason: string } {
-  const match = /\{[\s\S]*\}/.exec(raw)
-  if (!match) throw new Error(`judge returned no JSON: ${raw.slice(0, 200)}`)
-  const parsed = JSON.parse(match[0]) as { verdict?: string; reason?: string; done?: boolean }
-  // The legacy {"done": bool, "reason": string} shape is still accepted.
-  if (parsed.done !== undefined && !parsed.verdict) {
-    return { verdict: parsed.done ? "done" : "continue", reason: parsed.reason ?? "" }
-  }
-  if (parsed.verdict !== "done" && parsed.verdict !== "blocked" && parsed.verdict !== "continue") {
-    throw new Error(`judge returned an unknown verdict: ${parsed.verdict}`)
-  }
-  return { verdict: parsed.verdict, reason: parsed.reason ?? "" }
-}
 
 /** True while some process has the file open. Unknown (no lsof) counts as still running. */
 async function holdsOpen(path: string): Promise<boolean> {
@@ -367,6 +371,116 @@ export default Plugin.define({
       if (active) await write(sessionID, { ...active, maxTurns })
     }
 
+    const settingsSnapshot = async (sessionID: string) => {
+      const effective = await settingsFor(sessionID)
+      return { text: renderSettings(effective), form: settingsForm(effective, configured) }
+    }
+
+    /**
+     * Apply one setting. Shared by the slash commands and the settings window, so a click
+     * and `/goal stall 4` write the same record and say the same thing.
+     */
+    const applySetting = async (
+      sessionID: string,
+      key: SettingKey,
+      argument: string,
+    ): Promise<{ ok: boolean; title: string; message: string; variant?: "warning" | "error" }> => {
+      if (key === "budget") {
+        const parsed = parseBudgetArgument(argument)
+        if (parsed.kind === "invalid") {
+          return {
+            ok: false,
+            title: "Turn budget",
+            message: `Give me ${UNLIMITED_HINT}, a whole number, or default. For example: /goal budget inf.`,
+          }
+        }
+        const next: Budget = parsed.kind === "default" ? configuredBudget : parsed.budget
+        await writeOverride(sessionID, { maxTurns: parsed.kind === "default" ? undefined : next })
+        await applyLiveBudget(sessionID, next)
+        return {
+          ok: true,
+          title: "Turn budget",
+          message:
+            parsed.kind === "default"
+              ? `reset to the configured default (${budgetLabel(next)})`
+              : next === null
+                ? "unlimited — the judge and the stall and repetition guards are the only stops"
+                : `${next} for this session`,
+          ...(next === null ? { variant: "warning" as const } : {}),
+        }
+      }
+      if (key === "stall" || key === "poll") {
+        const parsed = parseCount(argument, key)
+        const title = key === "stall" ? "Stall limit" : "Poll limit"
+        if (parsed.kind === "invalid") {
+          return {
+            ok: false,
+            title,
+            message:
+              key === "stall"
+                ? "Give me a whole number of turns, or default. For example: /goal stall 4."
+                : "Give me a whole number of observations, or default. For example: /goal poll 5.",
+          }
+        }
+        const fallback = key === "stall" ? configuredStall : configuredPoll
+        const next = parsed.kind === "clear" ? fallback : parsed.value
+        await writeOverride(sessionID, { [key]: parsed.kind === "clear" ? undefined : next })
+        return {
+          ok: true,
+          title,
+          message:
+            parsed.kind === "clear"
+              ? `reset to the configured default (${next})`
+              : key === "stall"
+                ? `${next} turns with no tools`
+                : `${next} turns with an unchanged result`,
+        }
+      }
+      if (key === "quiet") {
+        const parsed = parseFlag(argument)
+        if (parsed.kind === "invalid") {
+          return {
+            ok: false,
+            title: "Quiet mode",
+            message: "Give me on, off, or default. For example: /goal quiet off.",
+          }
+        }
+        const next = parsed.kind === "clear" ? configuredQuiet : parsed.value
+        await writeOverride(sessionID, { quiet: parsed.kind === "clear" ? undefined : next })
+        return {
+          ok: true,
+          title: "Quiet mode",
+          message:
+            parsed.kind === "clear"
+              ? `reset to the configured default (${next ? "on" : "off"})`
+              : next
+                ? "on — the panel replaces the loop's transcript notices"
+                : "off — the loop writes its turn notices as well as showing the panel",
+        }
+      }
+      const parsed = parseModel(argument)
+      if (parsed.kind === "invalid") {
+        return {
+          ok: false,
+          title: "Judge model",
+          message:
+            "Give me provider/model, optionally #variant, or default. For example: /goal judge openrouter/google/gemini-3-flash-preview.",
+        }
+      }
+      const next = parsed.kind === "clear" ? configuredJudge : parsed.value
+      await writeOverride(sessionID, {
+        judge: parsed.kind === "clear" || next === null ? undefined : next,
+      })
+      return {
+        ok: true,
+        title: "Judge model",
+        message:
+          parsed.kind === "clear"
+            ? `reset to the configured default (${modelLabel(next)})`
+            : modelLabel(next),
+      }
+    }
+
     const budgetKey = (sessionID: string) => `settings:${sessionID}`
     /**
      * Stored as `{ budget }` rather than the bare value, because `null` is both
@@ -465,13 +579,20 @@ export default Plugin.define({
      */
     const PRESENT_TTL = 5 * 60 * 1000
     const isTuiPresent = async (directory: string) => {
-      const record = (await ctx.storage.get(`present:${directory}`)) as { at?: number } | undefined
-      if (typeof record?.at !== "number") return false
-      if (Date.now() - record.at > PRESENT_TTL) {
-        await ctx.storage.remove(`present:${directory}`)
-        return false
-      }
-      return true
+      const page = await ctx.storage.scan({ prefix: "present:", limit: 100 })
+      const records = page.entries.map((entry) => entry.value as PresenceRecord)
+      // Records written before the directory was stored carry only a time. They are matched by
+      // the exact key, as before, so an older TUI keeps working until its next heartbeat.
+      const exact = (await ctx.storage.get(`present:${directory}`)) as PresenceRecord | undefined
+      if (exact) records.push({ at: exact.at, directory })
+      if (presentFor(records, directory, Date.now(), PRESENT_TTL, canonical)) return true
+      // The next occurrence has to be visible in the log: a miss here is what turns a pure
+      // question like /goal help into a transcript message, and therefore a prompt.
+      console.warn?.(
+        `[goal] no TUI is present for ${directory}; answering in the transcript. Seen: ` +
+          (records.map((record) => String(record.directory ?? "?")).join(", ") || "none"),
+      )
+      return false
     }
 
     const rpc = await ctx.rpc.register(Goal, {
@@ -492,8 +613,25 @@ export default Plugin.define({
       },
       present: async (input) => {
         const { directory } = input as { directory: string }
-        await ctx.storage.set(`present:${directory}`, { at: Date.now() })
+        const at = Date.now()
+        await ctx.storage.set(`present:${directory}`, { at, directory })
+        const real = canonical(directory)
+        if (real !== directory) await ctx.storage.set(`present:${real}`, { at, directory: real })
         return {}
+      },
+      readSettings: async (input) => {
+        const { sessionID } = input as { sessionID: string }
+        return settingsSnapshot(sessionID)
+      },
+      configure: async (input) => {
+        const { sessionID, key, argument } = input as { sessionID: string; key: string; argument: string }
+        if (!isSettingKey(key)) {
+          const snapshot = await settingsSnapshot(sessionID)
+          return { ok: false, title: "Settings", message: "Unknown setting.", text: snapshot.text, form: snapshot.form }
+        }
+        const result = await applySetting(sessionID, key, argument)
+        const snapshot = await settingsSnapshot(sessionID)
+        return { ...result, text: snapshot.text, form: snapshot.form }
       },
     })
 
@@ -767,7 +905,7 @@ export default Plugin.define({
         name: "goal",
         description:
           "Set a standing goal and keep working until it is done, blocked, stalled, or out of turns. " +
-          "Subcommands: status, pause, resume, clear, panel, display, help",
+          "Subcommands: status, rounds, pause, resume, clear, panel, display, help",
         execute: async ({ sessionID, prompt, delivery }) => {
           // `prompt.text` may or may not still carry the "/goal" prefix.
           const raw = prompt.text.replace(/^\s*\/goal\b/i, "").trim()
@@ -775,7 +913,7 @@ export default Plugin.define({
           const sub = (head ?? "").toLowerCase()
           const argument = rest.join(" ").trim()
 
-          if (["pause", "resume", "clear", "status", "panel", "help", "budget"].includes(sub) && !argument) {
+          if (["pause", "resume", "clear", "status", "panel", "help", "budget", "rounds"].includes(sub) && !argument) {
             // A subcommand is a direct question, so it always answers — even when
             // the panel is open and already showing the same thing. Going quiet
             // here reads as the command being broken.
@@ -798,6 +936,18 @@ export default Plugin.define({
             }
             if (sub === "status") {
               await note(sessionID, statusReport(state))
+              return
+            }
+            if (sub === "rounds") {
+              if (await tuiHere(sessionID)) {
+                try {
+                  await rpc.events.emit("rounds", { sessionID })
+                  return
+                } catch {
+                  // Fall through to the transcript rather than say nothing.
+                }
+              }
+              await note(sessionID, roundsReport(state?.rounds ?? [], state?.roundsDropped ?? 0))
               return
             }
             if (sub === "budget") {
@@ -856,6 +1006,7 @@ export default Plugin.define({
                 lastObservation: undefined,
                 reason: undefined,
                 pausedBy: undefined,
+                turnStartedAt: Date.now(),
               }
               await write(sessionID, resumed)
               await ctx.session.prompt({
@@ -882,141 +1033,23 @@ export default Plugin.define({
           // here rather than in the no-argument branch above. Inside that branch
           // `/goal budget 40` would skip it entirely and the goal parser would
           // set a goal reading "budget 40".
-          if (sub === "budget") {
-            const parsed = parseBudgetArgument(argument)
-            if (parsed.kind === "invalid") {
-              await announce(
-                sessionID,
-                "Turn budget",
-                `Give me ${UNLIMITED_HINT}, a whole number, or default. For example: /goal budget inf.`,
-                "error",
-              )
-              return
-            }
-            const next: Budget = parsed.kind === "default" ? configuredBudget : parsed.budget
-            await writeOverride(sessionID, {
-              maxTurns: parsed.kind === "default" ? undefined : next,
-            })
-            // Apply straight away when a goal is already running, rather than
-            // waiting for the next one to be set.
-            await applyLiveBudget(sessionID, next)
-            await announce(
-              sessionID,
-              "Turn budget",
-              parsed.kind === "default"
-                ? `reset to the configured default (${budgetLabel(next)})`
-                : next === null
-                  ? // The caveat is a paragraph, which does not belong in a
-                    // toast that disappears. /goal help and the README carry it.
-                    "unlimited — the judge and the stall and repetition guards are the only stops"
-                  : `${next} for this session`,
-              next === null ? "warning" : undefined,
-            )
+          if (sub === "budget" || sub === "stall" || sub === "poll" || sub === "quiet" || sub === "judge") {
+            const result = await applySetting(sessionID, sub, argument)
+            await announce(sessionID, result.title, result.message, result.ok ? result.variant : "error")
             return
           }
 
-          if (sub === "stall" || sub === "poll" || sub === "quiet" || sub === "judge" || sub === "settings") {
-            if (sub === "settings") {
-              const summary = renderSettings(await settingsFor(sessionID))
-              if (await tuiHere(sessionID)) {
-                try {
-                  await rpc.events.emit("settings", { text: summary })
-                  return
-                } catch {}
-              }
-              // No TUI to show a dialog, so print it in the transcript instead.
-              await note(sessionID, summary)
-              return
-            }
-            if (sub === "stall") {
-              const parsed = parseCount(argument, "stall")
-              if (parsed.kind === "invalid") {
-                await announce(
-                  sessionID,
-                  "Stall limit",
-                  "Give me a whole number of turns, or default. For example: /goal stall 4.",
-                  "error",
-                )
+          if (sub === "settings") {
+            const snapshot = await settingsSnapshot(sessionID)
+            if (await tuiHere(sessionID)) {
+              try {
+                await rpc.events.emit("settings", { text: snapshot.text, sessionID, form: snapshot.form })
                 return
+              } catch {
+                // Fall through to the transcript rather than say nothing.
               }
-              const next = parsed.kind === "clear" ? configuredStall : parsed.value
-              await writeOverride(sessionID, { stall: parsed.kind === "clear" ? undefined : next })
-              await announce(
-                sessionID,
-                "Stall limit",
-                parsed.kind === "clear"
-                  ? `reset to the configured default (${next})`
-                  : `${next} turns with no tools`,
-              )
-              return
             }
-            if (sub === "poll") {
-              const parsed = parseCount(argument, "poll")
-              if (parsed.kind === "invalid") {
-                await announce(
-                  sessionID,
-                  "Poll limit",
-                  "Give me a whole number of observations, or default. For example: /goal poll 5.",
-                  "error",
-                )
-                return
-              }
-              const next = parsed.kind === "clear" ? configuredPoll : parsed.value
-              await writeOverride(sessionID, { poll: parsed.kind === "clear" ? undefined : next })
-              await announce(
-                sessionID,
-                "Poll limit",
-                parsed.kind === "clear"
-                  ? `reset to the configured default (${next})`
-                  : `${next} turns with an unchanged result`,
-              )
-              return
-            }
-            if (sub === "quiet") {
-              const parsed = parseFlag(argument)
-              if (parsed.kind === "invalid") {
-                await announce(
-                  sessionID,
-                  "Quiet mode",
-                  "Give me on, off, or default. For example: /goal quiet off.",
-                  "error",
-                )
-                return
-              }
-              const next = parsed.kind === "clear" ? configuredQuiet : parsed.value
-              await writeOverride(sessionID, { quiet: parsed.kind === "clear" ? undefined : next })
-              await announce(
-                sessionID,
-                "Quiet mode",
-                parsed.kind === "clear"
-                  ? `reset to the configured default (${next ? "on" : "off"})`
-                  : next
-                    ? "on — the panel replaces the loop's transcript notices"
-                    : "off — the loop writes its turn notices as well as showing the panel",
-              )
-              return
-            }
-            const parsed = parseModel(argument)
-            if (parsed.kind === "invalid") {
-              await announce(
-                sessionID,
-                "Judge model",
-                "Give me provider/model, optionally #variant, or default. For example: /goal judge openrouter/google/gemini-3-flash-preview.",
-                "error",
-              )
-              return
-            }
-            const next = parsed.kind === "clear" ? configuredJudge : parsed.value
-            await writeOverride(sessionID, {
-              judge: parsed.kind === "clear" || next === null ? undefined : next,
-            })
-            await announce(
-              sessionID,
-              "Judge model",
-              parsed.kind === "clear"
-                ? `reset to the configured default (${modelLabel(next)})`
-                : modelLabel(next),
-            )
+            await note(sessionID, snapshot.text)
             return
           }
 
@@ -1070,6 +1103,9 @@ export default Plugin.define({
             lastObservation: undefined,
             reason: undefined,
             evidence: emptyDigest(),
+            turnStartedAt: Date.now(),
+            rounds: [],
+            roundsDropped: 0,
           }
           await write(sessionID, state)
           await ctx.session.prompt({
@@ -1118,22 +1154,36 @@ export default Plugin.define({
         }
 
         judging.add(sessionID)
+        const settledAt = Date.now()
         try {
           if (event.type === "session.execution.failed") {
             const reason = `the turn failed: ${event.data.error?.message ?? "unknown error"}`
-            await write(sessionID, { ...state, status: "paused", reason })
+            await write(
+              sessionID,
+              withRound(
+                { ...state, status: "paused" as const, reason },
+                { settledAt, outcome: "failed", reason, toolCalls: 0 },
+              ),
+            )
             await terminal(sessionID, `⏸ Goal paused — ${reason}. Use /goal resume to continue.`)
             continue
           }
           if (event.type === "session.execution.interrupted") {
-            await write(sessionID, { ...state, status: "paused", reason: `interrupted (${event.data.reason})` })
+            const why = `interrupted (${event.data.reason})`
+            await write(
+              sessionID,
+              withRound(
+                { ...state, status: "paused" as const, reason: why },
+                { settledAt, outcome: "interrupted", reason: why, toolCalls: 0 },
+              ),
+            )
             await terminal(sessionID, `⏸ Goal paused — interrupted (${event.data.reason}). Use /goal resume to continue.`)
             continue
           }
 
           const preview = await lastAssistantTurn(ctx, sessionID)
           let evidence = withPending(state.evidence ?? emptyDigest(), preview.pending)
-          let verdict: { verdict: Verdict; reason: string }
+          let verdict: { verdict: Verdict; reason: string; achieved?: string }
           try {
             verdict = await judge(sessionID, { ...state, evidence })
           } catch (error) {
@@ -1179,7 +1229,7 @@ export default Plugin.define({
                 },
               })
               evidence = confirmed.results.reduce((digest, result) => appendEvidence(digest, result), evidence)
-              verdict = { verdict: confirmed.verdict, reason: confirmed.reason }
+              verdict = { verdict: confirmed.verdict, reason: confirmed.reason, achieved: verdict.achieved }
             } catch (error) {
               verdict = { verdict: "continue", reason: `verify-cmd unavailable (${(error as Error).message})` }
             }
@@ -1187,9 +1237,31 @@ export default Plugin.define({
 
           // A goal_blocked call during this turn already paused. Do not let the verdict overwrite it.
           const fresh = await read(sessionID)
-          if (!fresh || heldByTool(fresh)) continue
+          if (!fresh) continue
+          if (heldByTool(fresh)) {
+            await write(
+              sessionID,
+              withRound(fresh, {
+                settledAt,
+                outcome: "paused",
+                reason: fresh.reason,
+                achieved: verdict.achieved,
+                toolCalls: preview.toolCalls,
+              }),
+            )
+            continue
+          }
 
-          const progressed: GoalState = { ...fresh, evidence, reason: verdict.reason }
+          const progressed: GoalState = withRound(
+            { ...fresh, evidence, reason: verdict.reason },
+            {
+              settledAt,
+              outcome: verdict.verdict,
+              reason: verdict.reason,
+              achieved: verdict.achieved,
+              toolCalls: preview.toolCalls,
+            },
+          )
 
           if (verdict.verdict === "done") {
             await write(sessionID, { ...progressed, status: "done" })
@@ -1276,6 +1348,8 @@ export default Plugin.define({
             // Someone may have paused, cleared or replaced the goal while we waited.
             if ((await read(sessionID))?.status !== "active") continue
           }
+          const sending = await read(sessionID)
+          if (sending?.status === "active") await write(sessionID, { ...sending, turnStartedAt: Date.now() })
           // No status message here on purpose: a synthetic inbox message is a
           // real prompt, so it would start another execution, re-enter this
           // loop, and burn the budget twice as fast. The continuation prompt
