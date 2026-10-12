@@ -29,7 +29,9 @@ export const TOOLS = {
     name: "goal_blocked",
     description:
       "When a standing goal cannot be completed as written, call this instead of saying so in the reply. " +
-      "Naming a blocker in prose does not pause the loop. A non-empty reason is required.",
+      "Naming a blocker in prose does not pause the loop. A non-empty reason is required. " +
+      "Use it also for a question only the user can answer: put the question in the reason, then ask it in your reply " +
+      "and end the turn. When the user answers, the goal resumes automatically; act on the answer.",
   },
   goal_pending: {
     name: "goal_pending",

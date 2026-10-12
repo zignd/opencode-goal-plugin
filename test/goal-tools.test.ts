@@ -1,6 +1,6 @@
 import { describe, test } from "node:test"
 import assert from "node:assert/strict"
-import { goalBlocked, goalEvidence, goalPending, heldByTool } from "../src/goal-tools.ts"
+import { goalBlocked, goalEvidence, goalPending, heldByTool, onPausedSettle } from "../src/goal-tools.ts"
 import { emptyDigest } from "../src/evidence.ts"
 import { pendingBackground } from "../src/waiting.ts"
 import { allowanceUsedMessage } from "../src/waiting.ts"
@@ -120,5 +120,19 @@ describe("goal_evidence", () => {
     assert.match(filed.state!.evidence!.entries[0].output, /characters omitted/)
     assert.match(filed.state!.evidence!.entries[0].output, /^H/)
     assert.match(filed.state!.evidence!.entries[0].output, /T$/)
+  })
+})
+
+describe("resuming a tool pause on the user's answer", () => {
+  test("the pausing turn is marked, the next settled turn resumes", () => {
+    const paused = goalBlocked(active, "which database?").state!
+    assert.equal(onPausedSettle(paused), "mark")
+    assert.equal(onPausedSettle({ ...paused, pauseSettled: true }), "resume")
+  })
+
+  test("a user pause, an active goal, or no goal never resumes by itself", () => {
+    assert.equal(onPausedSettle({ status: "paused" }), "ignore")
+    assert.equal(onPausedSettle(active), "ignore")
+    assert.equal(onPausedSettle(undefined), "ignore")
   })
 })

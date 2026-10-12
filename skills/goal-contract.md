@@ -39,7 +39,7 @@ verify-cmd: grep -q "exit 0" build/gate.log
 
 - `verify-cmd:` re-reads a log the agent already wrote (`grep`, `tail`, a tracker script). It never re-runs the proof. A test suite or a ten-minute gate belongs in the reply, because running it again races the agent and can demote a real pass. The timeout is 120 seconds.
 - Write the proof as something checkable: a command and the output it must print, a file that must exist, a count that must be reached. "Works well" cannot be judged.
-- `stop when:` is for a real stop, such as a missing tool or a decision only the user can make. The agent ends it by calling `goal_blocked`. Naming a blocker in the reply does not pause the loop.
+- `stop when:` is for a real stop, such as a missing tool or a decision only the user can make. The agent ends it by calling `goal_blocked`. Naming a blocker in the reply does not pause the loop. If the user answers, the goal resumes by itself on the agent's next reply.
 - Do not tell the agent to copy the goal into a child session, and do not mention a `goal_done` tool. There is none. Only the judge, plus `verify-cmd`, finishes a goal.
 
 ### What to hand back

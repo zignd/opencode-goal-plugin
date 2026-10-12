@@ -8,7 +8,7 @@ import { parseVerdict } from "./verdict.js"
 import { presentFor, type PresenceRecord } from "./presence.js"
 import { parseGoal, renderContract, type Contract } from "./contract.js"
 import { appendEvidence, emptyDigest, renderEvidence, withPending, type EvidenceDigest } from "./evidence.js"
-import { goalBlocked, goalEvidence, goalPending, heldByTool } from "./goal-tools.js"
+import { goalBlocked, goalEvidence, goalPending, heldByTool, onPausedSettle } from "./goal-tools.js"
 import { buildJudgePrompt, continuationPrompt, TOOLS } from "./prompt.js"
 import { DRAFT_USAGE, draftPrompt, readSkillBody, SKILL_DESCRIPTION, SKILL_ID, SKILL_PATH } from "./skill.js"
 import {
@@ -123,6 +123,8 @@ type GoalState = {
   reason?: string
   /** Set when `goal_blocked` paused the loop. A later judge verdict must not clear it. */
   pausedBy?: "tool"
+  /** The turn that called `goal_blocked` has settled; the next settled turn is the user's reply. */
+  pauseSettled?: boolean
   /** When the plugin sent the prompt for the turn now running. Judge time is not in a round. */
   turnStartedAt?: number
   /** One entry per settled turn, newest kept, with how many fell off the front. */
@@ -1006,6 +1008,7 @@ export default Plugin.define({
                 lastObservation: undefined,
                 reason: undefined,
                 pausedBy: undefined,
+                pauseSettled: undefined,
                 turnStartedAt: Date.now(),
               }
               await write(sessionID, resumed)
@@ -1145,12 +1148,54 @@ export default Plugin.define({
         const sessionID = event.data.sessionID
         if (judging.has(sessionID)) continue
         const state = await read(sessionID)
-        if (!state || state.status !== "active") continue
+        const paused = onPausedSettle(state)
+        if (!state || (state.status !== "active" && paused === "ignore")) continue
         const owned = ownsEvent(event)
         if (owned === false) continue
         if (owned === undefined) {
           if (!(await claim(event.id))) continue
           void pruneClaims().catch(() => {})
+        }
+
+        if (paused !== "ignore") {
+          // The agent paused on a question. Its own turn settles first; the user's answer settles next.
+          if (paused === "mark") {
+            await write(sessionID, { ...state, pauseSettled: true })
+            continue
+          }
+          if (event.type !== "session.execution.succeeded") continue
+          judging.add(sessionID)
+          try {
+            const resumed: GoalState = {
+              ...state,
+              status: "active",
+              turns: 1,
+              stalled: 0,
+              repeats: 0,
+              observing: 0,
+              lastDigest: undefined,
+              lastObservation: undefined,
+              reason: undefined,
+              pausedBy: undefined,
+              pauseSettled: undefined,
+              turnStartedAt: Date.now(),
+            }
+            await write(sessionID, resumed)
+            await ctx.session.prompt({
+              sessionID,
+              text: continuationPrompt(
+                resumed,
+                "the user answered your question, so the goal is resumed",
+                await suppressed(sessionID),
+                (await pendingIds(sessionID)).ids,
+              ),
+            })
+          } catch (error) {
+            await write(sessionID, { ...state, reason: (error as Error).message })
+          } finally {
+            judging.delete(sessionID)
+          }
+          continue
         }
 
         judging.add(sessionID)

@@ -473,6 +473,10 @@ and answer with a sentence; hiding them between turns is worse than a no-op.
 override that pause. `/goal resume` still does, and `/goal status` shows the reason so the
 resume is a choice. Naming a blocker in the reply does not pause anything.
 
+A tool pause can also be a question for you. Answer in the session and the goal resumes by
+itself: the turn that called `goal_blocked` settles first, and the next turn that settles (the
+agent answering you) restarts the loop with a fresh turn budget. `/goal clear` abandons it.
+
 `goal_pending` returns unfinished `sh_*` and `ses_*` ids and nothing else. `goal_evidence`
 appends a command, an exit code, and a capped output to the digest. Filing evidence does not
 finish the goal. There is no `goal_done`: the judge, plus `verify-cmd` when one was set, is

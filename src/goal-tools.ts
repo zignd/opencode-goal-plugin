@@ -19,6 +19,8 @@ type Active = {
   status: string
   reason?: string
   pausedBy?: "tool"
+  /** Set once the turn that called `goal_blocked` has settled. */
+  pauseSettled?: boolean
   evidence?: EvidenceDigest
 }
 
@@ -35,7 +37,7 @@ export function goalBlocked<T extends Active>(state: T | undefined, reason: unkn
   }
   return {
     content: `Goal paused: ${text}`,
-    state: { ...state, status: "paused", pausedBy: "tool", reason: text },
+    state: { ...state, status: "paused", pausedBy: "tool", pauseSettled: false, reason: text },
     schedule: false,
   }
 }
@@ -43,6 +45,18 @@ export function goalBlocked<T extends Active>(state: T | undefined, reason: unkn
 /** A tool pause is the agent using `stop when:`. A later `continue` does not wake it. */
 export function heldByTool(state: { status: string; pausedBy?: string } | undefined): boolean {
   return !state || state.status !== "active" || state.pausedBy === "tool"
+}
+
+/**
+ * What a settled turn means for a goal the agent paused with `goal_blocked`.
+ * The first one is the turn that made the call. The next one is the agent answering the user,
+ * so the user's reply is the unblock and the loop picks the goal back up.
+ */
+export function onPausedSettle(
+  state: { status: string; pausedBy?: string; pauseSettled?: boolean } | undefined,
+): "ignore" | "mark" | "resume" {
+  if (!state || state.status !== "paused" || state.pausedBy !== "tool") return "ignore"
+  return state.pauseSettled ? "resume" : "mark"
 }
 
 export function goalPending<T extends { status: string }>(
