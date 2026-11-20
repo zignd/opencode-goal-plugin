@@ -18,6 +18,26 @@ export const HELP_SECTIONS: Section[] = [
     ],
   },
   {
+    title: "Subgoals",
+    lines: [
+      "/subgoal <text>        add an acceptance criterion to the active goal",
+      "/subgoal               list the criteria, and which are met",
+      "/subgoal remove <n>    remove criterion n (1-based)",
+      "/subgoal clear         drop every criterion, keep the goal",
+      "/goal subgoal <text>   the same command under /goal",
+      "Every criterion must be met before the judge may say done.",
+    ],
+  },
+  {
+    title: "Progress",
+    lines: [
+      "Plan progress comes from the agent's todo list (todowrite), a checklist",
+      "in its latest reply, or a checklist in the goal. The panel, footer,",
+      "composer and sidebar show it as 37/245 (15%). Cancelled items are left",
+      "out of the total; in-progress items are not done.",
+    ],
+  },
+  {
     title: "Limits and the judge",
     lines: [
       "/goal budget <n|inf|default>   turns before the loop pauses",

@@ -1,6 +1,6 @@
 {
   "name": "opencode-goal-plugin",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Persistent /goal command for OpenCode 2: set a standing goal and keep working until it is done, blocked, stalled, or out of turns",
   "type": "module",
   "main": "./index.ts",

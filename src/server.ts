@@ -10,6 +10,26 @@ import { parseGoal, renderContract, type Contract } from "./contract.js"
 import { appendEvidence, emptyDigest, renderEvidence, withPending, type EvidenceDigest } from "./evidence.js"
 import { goalBlocked, goalEvidence, goalPending, heldByTool, onPausedSettle } from "./goal-tools.js"
 import { buildJudgePrompt, continuationPrompt, TOOLS } from "./prompt.js"
+import {
+  addSubgoal,
+  applySubgoalVerdict,
+  mergeSubgoals,
+  parseSubgoalArgument,
+  removeSubgoal,
+  renderSubgoalCriteria,
+  renderSubgoalList,
+  subgoalProgress,
+  subgoalReport,
+  type Judged,
+  type Subgoal,
+} from "./subgoals.js"
+import {
+  formatProgress,
+  progressFromMessages,
+  progressForGoal,
+  sameProgress,
+  type Progress,
+} from "./progress.js"
 import { DRAFT_USAGE, draftPrompt, readSkillBody, SKILL_DESCRIPTION, SKILL_ID, SKILL_PATH } from "./skill.js"
 import {
   clampTimeout,
@@ -97,7 +117,6 @@ import { NEVER_JUDGED_HINT, neverJudged } from "./status-flag.js"
  *   stop when: a DB schema migration is required
  */
 
-type Verdict = "done" | "continue" | "blocked"
 type Status = "active" | "paused" | "done" | "blocked"
 
 type GoalState = {
@@ -132,6 +151,10 @@ type GoalState = {
   roundsDropped?: number
   /** Last verify-cmd results and the ids still pending. Not cleared when a reply forgets them. */
   evidence?: EvidenceDigest
+  /** The plan's checklist progress, refreshed from the session's todo list. */
+  progress?: Progress
+  /** Criteria the user added mid-goal. Every one must be met before done. */
+  subgoals?: Subgoal[]
 }
 
 const DEFAULT_STALL_LIMIT = 2
@@ -172,6 +195,8 @@ function toView(state: GoalState): Omit<GoalView, "sessionID"> {
     turnStartedAt: state.turnStartedAt ?? 0,
     rounds: state.rounds ?? [],
     roundsDropped: state.roundsDropped ?? 0,
+    progress: progressForGoal(state.goal, state.progress) ?? null,
+    subgoals: (state.subgoals ?? []).map((subgoal) => ({ text: subgoal.text, met: subgoal.met })),
   }
 }
 
@@ -183,6 +208,13 @@ function statusReport(state: GoalState | undefined): string {
     `${icon} Goal (${state.status}) — ${formatTurns(state.turns, state.maxTurns)} turns used`,
     `  ${state.goal}`,
   ]
+  const plan = progressForGoal(state.goal, state.progress)
+  if (plan) lines.push(`  Progress: ${formatProgress(plan)}`)
+  const subgoals = subgoalProgress(state.subgoals)
+  if (subgoals) {
+    lines.push(`  Subgoals: ${formatProgress(subgoals)}`)
+    for (const line of renderSubgoalList(state.subgoals).split("\n")) lines.push(`    ${line}`)
+  }
   const last = state.rounds?.[state.rounds.length - 1]
   if (last) lines.push(`  Last round: #${last.n}, ${formatDuration(last.ms)} — ${last.achieved}`)
   if (state.pausedBy === "tool" && state.reason) lines.push(`  Paused: ${state.reason}`)
@@ -198,7 +230,14 @@ function statusReport(state: GoalState | undefined): string {
 async function lastAssistantTurn(
   ctx: any,
   sessionID: string,
-): Promise<{ text: string; model?: ModelRef; toolCalls: number; observation: string; pending: string[] }> {
+): Promise<{
+  text: string
+  model?: ModelRef
+  toolCalls: number
+  observation: string
+  pending: string[]
+  progress?: Progress
+}> {
   const messages = (await ctx.session.context({ sessionID })) as readonly any[]
 
   // A turn is every assistant message after the last user or synthetic input.
@@ -236,6 +275,7 @@ async function lastAssistantTurn(
     toolCalls,
     observation: digest(observationOf(turn)),
     pending: pendingBackground(messages),
+    progress: progressFromMessages(messages),
   }
 }
 
@@ -597,10 +637,31 @@ export default Plugin.define({
       return false
     }
 
+    /**
+     * The todo list changes during a turn, not only when one settles. The TUI
+     * polls `get` while a goal is active, so refresh the plan there. This only
+     * shapes the view: writing from a read would race a turn that settles
+     * between the read and the write. The next settle persists the progress.
+     */
+    const withLiveProgress = async (
+      sessionID: string,
+      state: GoalState | undefined,
+    ): Promise<GoalState | undefined> => {
+      if (!state || state.status !== "active") return state
+      try {
+        const messages = (await ctx.session.context({ sessionID })) as readonly unknown[]
+        const progress = progressFromMessages(messages)
+        if (!progress || sameProgress(state.progress, progress)) return state
+        return { ...state, progress }
+      } catch {
+        return state
+      }
+    }
+
     const rpc = await ctx.rpc.register(Goal, {
       get: async (input) => {
         const { sessionID } = input as { sessionID: string }
-        const state = await read(sessionID)
+        const state = await withLiveProgress(sessionID, await read(sessionID))
         return { sessionID, state: state ? { ...toView(state), sessionID } : null }
       },
       attach: async (input) => {
@@ -739,6 +800,7 @@ export default Plugin.define({
         response: capText(text) || "(the agent produced no text this turn)",
         evidence: renderEvidence(state.evidence),
         verify,
+        subgoals: renderSubgoalCriteria(state.subgoals),
       })
       const result = await ctx.generate.text({ model: chosen, prompt })
       return parseVerdict(result.text)
@@ -885,6 +947,71 @@ export default Plugin.define({
       console.warn?.("[goal] the goal-contract skill was not registered", error)
     }
 
+    /**
+     * `/subgoal` and `/goal subgoal` share this. A subgoal is a criterion, not a
+     * new turn: adding one never starts an execution. The next continuation
+     * carries it, and the judge is told every criterion has to be met.
+     */
+    const runSubgoal = async (sessionID: string, argument: string): Promise<void> => {
+      const parsed = parseSubgoalArgument(argument)
+      const state = await read(sessionID)
+
+      if (parsed.kind === "invalid") {
+        await announce(sessionID, "Subgoal", parsed.reason, "error")
+        return
+      }
+      if (!state) {
+        await announce(sessionID, "Subgoal", "No goal is set. Use /goal <text> first.")
+        return
+      }
+      if (parsed.kind === "list") {
+        // A list is a direct answer to something the user typed, like /goal
+        // status, so it goes to the transcript where it can be read in full.
+        await note(sessionID, subgoalReport(state.subgoals))
+        return
+      }
+      if (parsed.kind === "add") {
+        if (state.status !== "active") {
+          await announce(
+            sessionID,
+            "Subgoal",
+            `The goal is ${state.status}. Use /goal resume before adding a criterion.`,
+            "warning",
+          )
+          return
+        }
+        const subgoals = addSubgoal(state.subgoals, parsed.text)
+        const added = subgoals[subgoals.length - 1]
+        await write(sessionID, { ...state, subgoals })
+        await announce(
+          sessionID,
+          "Subgoal added",
+          `#${subgoals.length} ${added.text}`,
+          undefined,
+          subgoalReport(subgoals),
+        )
+        return
+      }
+      if (parsed.kind === "remove") {
+        const result = removeSubgoal(state.subgoals, parsed.n)
+        if (!result.ok) {
+          await announce(sessionID, "Subgoal", result.reason, "error")
+          return
+        }
+        await write(sessionID, { ...state, subgoals: result.subgoals })
+        await announce(
+          sessionID,
+          "Subgoal removed",
+          `#${parsed.n} ${result.removed.text}`,
+          undefined,
+          subgoalReport(result.subgoals),
+        )
+        return
+      }
+      await write(sessionID, { ...state, subgoals: [] })
+      await announce(sessionID, "Subgoals cleared", "The goal itself is unchanged.", undefined, subgoalReport([]))
+    }
+
     const command = await ctx.command.transform((editor) => {
       editor.add({
         name: "draft-goal",
@@ -904,16 +1031,31 @@ export default Plugin.define({
         },
       })
       editor.add({
+        name: "subgoal",
+        description:
+          "Add, list, remove, or clear acceptance criteria for the active goal. " +
+          "Usage: /subgoal <text> | /subgoal | /subgoal remove <n> | /subgoal clear",
+        execute: async ({ sessionID, prompt }) => {
+          const argument = prompt.text.replace(/^\s*\/subgoal\b/i, "").trim()
+          await runSubgoal(sessionID, argument)
+        },
+      })
+      editor.add({
         name: "goal",
         description:
           "Set a standing goal and keep working until it is done, blocked, stalled, or out of turns. " +
-          "Subcommands: status, rounds, pause, resume, clear, panel, display, help",
+          "Subcommands: status, rounds, pause, resume, clear, panel, display, settings, subgoal, help",
         execute: async ({ sessionID, prompt, delivery }) => {
           // `prompt.text` may or may not still carry the "/goal" prefix.
           const raw = prompt.text.replace(/^\s*\/goal\b/i, "").trim()
           const [head, ...rest] = raw.split(/\s+/)
           const sub = (head ?? "").toLowerCase()
           const argument = rest.join(" ").trim()
+
+          if (sub === "subgoal") {
+            await runSubgoal(sessionID, argument)
+            return
+          }
 
           if (["pause", "resume", "clear", "status", "panel", "help", "budget", "rounds"].includes(sub) && !argument) {
             // A subcommand is a direct question, so it always answers — even when
@@ -1228,7 +1370,7 @@ export default Plugin.define({
 
           const preview = await lastAssistantTurn(ctx, sessionID)
           let evidence = withPending(state.evidence ?? emptyDigest(), preview.pending)
-          let verdict: { verdict: Verdict; reason: string; achieved?: string }
+          let verdict: Judged
           try {
             verdict = await judge(sessionID, { ...state, evidence })
           } catch (error) {
@@ -1236,6 +1378,11 @@ export default Plugin.define({
             // is the real backstop.
             verdict = { verdict: "continue", reason: `judge unavailable (${(error as Error).message})` }
           }
+
+          // A `done` cannot stand while an additional criterion is open. Applied
+          // before verify-cmd so a contradiction does not run the proof.
+          let judged = applySubgoalVerdict(state.subgoals, verdict)
+          verdict = judged.verdict
 
           // Commands run only after a first-pass done. A continue or blocked does not run them,
           // and the second pass may demote done but must not promote a continue.
@@ -1274,7 +1421,14 @@ export default Plugin.define({
                 },
               })
               evidence = confirmed.results.reduce((digest, result) => appendEvidence(digest, result), evidence)
-              verdict = { verdict: confirmed.verdict, reason: confirmed.reason, achieved: verdict.achieved }
+              verdict = {
+                verdict: confirmed.verdict,
+                reason: confirmed.reason,
+                achieved: verdict.achieved,
+                ...(confirmed.met ? { met: confirmed.met } : verdict.met ? { met: verdict.met } : {}),
+              }
+              judged = applySubgoalVerdict(judged.subgoals, verdict)
+              verdict = judged.verdict
             } catch (error) {
               verdict = { verdict: "continue", reason: `verify-cmd unavailable (${(error as Error).message})` }
             }
@@ -1283,13 +1437,19 @@ export default Plugin.define({
           // A goal_blocked call during this turn already paused. Do not let the verdict overwrite it.
           const fresh = await read(sessionID)
           if (!fresh) continue
-          if (heldByTool(fresh)) {
+          const subgoals = mergeSubgoals(fresh.subgoals, judged.subgoals)
+          const withPlan: GoalState = {
+            ...fresh,
+            ...(preview.progress ? { progress: preview.progress } : {}),
+            ...(subgoals ? { subgoals } : {}),
+          }
+          if (heldByTool(withPlan)) {
             await write(
               sessionID,
-              withRound(fresh, {
+              withRound(withPlan, {
                 settledAt,
                 outcome: "paused",
-                reason: fresh.reason,
+                reason: withPlan.reason,
                 achieved: verdict.achieved,
                 toolCalls: preview.toolCalls,
               }),
@@ -1298,7 +1458,7 @@ export default Plugin.define({
           }
 
           const progressed: GoalState = withRound(
-            { ...fresh, evidence, reason: verdict.reason },
+            { ...withPlan, evidence, reason: verdict.reason },
             {
               settledAt,
               outcome: verdict.verdict,

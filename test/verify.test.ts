@@ -46,6 +46,16 @@ describe("confirmDone", () => {
     assert.equal(out.verdict, "done")
   })
 
+  test("the second pass's met list is carried through", async () => {
+    const out = await confirmDone({
+      first: { verdict: "done", reason: "claimed" },
+      commands: ["grep -q passed log"],
+      run: async () => passed("passed"),
+      judgeAgain: async () => ({ verdict: "done", reason: "the log says passed", met: [1, 2] }),
+    })
+    assert.deepEqual(out.met, [1, 2])
+  })
+
   test("a continue does not run the command, and cannot be promoted", async () => {
     let ran = 0
     const out = await confirmDone({

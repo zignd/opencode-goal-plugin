@@ -9,12 +9,15 @@
 
 import { formatTurns, type Budget } from "./budget.js"
 import { renderContract, type Contract } from "./contract.js"
+import { renderSubgoalBlock, type Subgoal } from "./subgoals.js"
 
 export type ContinuationState = {
   goal: string
   contract: Contract
   turns: number
   maxTurns: Budget
+  /** Criteria the user added mid-goal. Every one has to be met before `done`. */
+  subgoals?: readonly Subgoal[]
 }
 
 export const TOOLS = {
@@ -60,7 +63,7 @@ export function continuationPrompt(
     pending.length > 0
       ? `A worker is still running on this task (${pending.join(", ")}); do not start another on the same files. If there is nothing else to do, call goal_wait instead of replying with a status update.`
       : `The goal is not met yet. Take the next concrete step. Do not repeat a command that just failed or an edit you just made unless something has changed. If a background command you started is still running and there is nothing else to do, call goal_wait instead of replying with a status update. If the goal cannot be completed as written, call goal_blocked with the reason instead of saying so in the reply. If a command just proved a part of verify:, call goal_evidence with the command, the exit code, and the output instead of leaving the proof only in the reply.`
-  return `${banner}Goal: ${state.goal}${renderContract(state.contract)}
+  return `${banner}Goal: ${state.goal}${renderContract(state.contract)}${renderSubgoalBlock(state.subgoals)}
 
 Judge's note: ${reason}
 
@@ -79,13 +82,20 @@ export function buildJudgePrompt(input: {
   response: string
   evidence: string
   verify?: string
+  /** Rendered additional criteria, or "" when the goal has no subgoals. */
+  subgoals?: string
 }): string {
   const verify = input.verify?.trim() ? `\n\n<verify-cmd>\n${input.verify.trim()}\n</verify-cmd>` : ""
+  const hasSubgoals = Boolean(input.subgoals?.trim())
+  const metField = hasSubgoals ? `, "met": [1, 2]` : ""
+  const metRule = hasSubgoals
+    ? `\n- The goal has additional criteria above. Do not return "done" unless the original objective AND every additional criterion are met. If one cannot be met, return "blocked" and name it.\n- "met" is required: list the 1-based numbers of every additional criterion that is now demonstrably met, including ones met in earlier turns. Use [] when none are met. A partial list alongside "done" is a contradiction and will be treated as "continue".`
+    : ""
   return `You are a strict completion judge for an autonomous coding agent. You do not do the work and you never give advice. Your only job is to classify the state of a standing goal after one turn.
 
 <goal>
 ${input.goal}
-</goal>${input.contract}
+</goal>${input.contract}${input.subgoals ?? ""}
 
 <loop state>
 Turn ${input.turn} of at most ${input.maxTurns} have been spent on this goal.
@@ -102,7 +112,7 @@ ${input.response}
 </agent's last response>
 
 Reply with exactly one line of strict JSON and nothing else:
-{"verdict": "done" | "blocked" | "continue", "reason": "<one sentence>", "achieved": "<one or two sentences>"}
+{"verdict": "done" | "blocked" | "continue", "reason": "<one sentence>", "achieved": "<one or two sentences>"${metField}}
 
 "achieved" says what THIS turn concretely did: files changed, commands run and what they printed. It is never what remains to be done, and never a restatement of the goal. Leave it "" when the turn did nothing.
 
@@ -115,5 +125,5 @@ Rules:
 - "continue" when real progress is still possible, AND when this turn was unproductive. Slow is fine. Waiting is fine. Stalled is not.
 - A turn that checked on work already in flight — a background build, a long test run, a command started earlier — is WAITING, not going in circles, unless the underlying work shows no progress at all across several turns. Do not read a repeated read-only check as a dead goal.
 - If the loop state above suggests repetition, the correct verdict is still "continue": say in the reason what the agent should change (do different work, or stop polling and wait for the result), and let the next turn act on it.
-- The digest and the pending-id list are the off-screen record. Anything not in the reply, the digest, or that list did not happen.`
+- The digest and the pending-id list are the off-screen record. Anything not in the reply, the digest, or that list did not happen.${metRule}`
 }

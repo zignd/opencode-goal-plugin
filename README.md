@@ -24,7 +24,8 @@ is a V2 server plugin.
 
 1. `/goal <text>` stores the goal against the current session and submits the first turn.
 2. When the turn settles, a **judge model** reads the goal and the agent's last reply and
-   returns strict JSON: `{"verdict": "done" | "blocked" | "continue", "reason": "…"}`.
+   returns strict JSON: `{"verdict": "done" | "blocked" | "continue", "reason": "…"}`, plus a
+   `met` list of satisfied subgoals when the goal has any.
 3. `continue` posts a continuation prompt straight back into the same session, and the loop
    repeats. The judge sees the loop's own history (turn number, tool calls last turn,
    consecutive no-change turns, its previous verdict), so it can recognise a loop it is
@@ -40,6 +41,10 @@ small fast model to cut cost (the call is ~200 output tokens, once per turn).
 - **Standing goals** that survive across turns, stored per session in durable plugin storage.
   An active goal also survives an OpenCode restart and picks the loop back up on your next
   message.
+- **Subgoals** — append acceptance criteria mid-goal with `/subgoal`. Every criterion must be
+  met before the judge may say `done`, and the list survives `/goal resume`.
+- **Plan progress** — when the agent keeps a todo list (`todowrite`) or a markdown checklist,
+  every placement shows `37/245 (15%)`: the panel, footer, composer and sidebar.
 - **Completion contracts** — attach `verify:`, `constraints:`, `scope:` and `stop when:`
   lines to a goal so the judge knows what "done" actually means instead of guessing. A field
   may be a fence when it needs more than one paragraph. `verify-cmd:` is a cheap re-read the
@@ -169,6 +174,8 @@ to the transcript only when there is no TUI to show it — desktop, the web clie
 | `/goal stall`, `/goal quiet`, `/goal judge`, `/goal budget <n>` | toast, no model call |
 | `/goal settings` | dialog, no model call |
 | `/goal panel`, `/goal display` | toast, no model call |
+| `/subgoal <text>`, `/subgoal remove <n>`, `/subgoal clear` | toast, no model call |
+| `/subgoal` | in the transcript, so the full list can be read |
 | `/goal status`, `/goal pause`, `/goal resume`, `/goal clear` | in the transcript, a model call each |
 
 The last row is deliberate. Those are direct answers to something you typed, and `/goal status`
@@ -252,6 +259,10 @@ drives that session's loop.
 | `/goal pause` | Stop auto-continuation but keep the goal. |
 | `/goal resume` | Resume the loop with a fresh turn budget. |
 | `/goal clear` | Drop the goal entirely. |
+| `/subgoal <text>` | Add an acceptance criterion to the active goal. |
+| `/subgoal` | List the criteria and which ones are met. |
+| `/subgoal remove <n>` | Remove criterion `n`, 1-based. |
+| `/subgoal clear` | Drop every criterion but keep the goal. |
 | `/goal panel` | Open or close the panel. TUI only; elsewhere it says so. Works whether the panel is open or closed. |
 | `/goal display` | Choose where the goal is shown. TUI only. |
 | `/goal help` | The full command reference, in a dialog. |
@@ -274,12 +285,19 @@ itself when you start a goal:
 Fix every failing test in tests/api
 proof: scripts/run-tests.sh passes
 ████████░░░░░░░░ 3/20 turns
+PROGRESS
+plan 37/245 (15%)
+████░░░░░░░░░░░░
+subgoals 1/2 (50%)
+1. [x] add a regression test for the parser
+2. [ ] keep the /login response shape
 The agent fixed two tests but tests/api/test_auth.py still fails
 ```
 
-It shows the goal, the `verify:` line it is working toward, a turn counter, the stalled and
-repeating counters when they are non-zero, and the judge's last reason. When the loop reaches
-`done`, `blocked` or paused, you get a toast instead of a message in the transcript.
+It shows the goal, the `verify:` line it is working toward, a turn counter, the plan's
+progress and any subgoals, the stalled and repeating counters when they are non-zero, and the
+judge's last reason. When the loop reaches `done`, `blocked` or paused, you get a toast
+instead of a message in the transcript.
 
 Dismiss the panel with its own control, or toggle it with `/goal panel`.
 
@@ -415,6 +433,65 @@ Only these exact prefixes are recognised, so an ordinary goal containing a colon
 (`Fix bug: the parser drops commas`) is left alone. The one-line form still works: a non-blank
 continuation line stays in the field, and a blank line ends it.
 
+### Subgoals
+
+A goal can be tightened while it is running. `/subgoal <text>` appends one numbered
+acceptance criterion without resetting the loop:
+
+| Command | What it does |
+| --- | --- |
+| `/subgoal <text>` | Append a criterion to the active goal. Requires an active `/goal`. |
+| `/subgoal` | Show the current numbered list, with `[x]` for criteria the judge says are met. |
+| `/subgoal remove <n>` | Remove criterion `n`, 1-based. The rest renumber. |
+| `/subgoal clear` | Drop every criterion, keep the original goal. |
+
+`/goal subgoal` is an alias, so the subcommand also appears in `/goal`'s own list.
+
+The criteria are stored inside the goal, so they survive `/goal resume`. Setting a new
+`/goal <text>` replaces the goal and clears the list; `/goal clear` drops both.
+
+Every continuation carries the list under **Additional criteria the user added mid-goal**,
+and the judge is told that the goal is not done until the original objective **and every
+criterion** are met. The judge also returns a `met` list each turn, which is what the panel
+shows as subgoal progress. A `done` verdict with a partially met list is demoted to
+`continue` deterministically, so a permissive judge cannot skip a criterion.
+
+This is the intended use: you start `/goal Fix the failing tests`, notice partway through
+that the fix also needs a regression test, and run:
+
+```text
+/subgoal add a regression test for the bug you just patched
+```
+
+The loop keeps running, and the new criterion joins the bar for `done`.
+
+## Plan progress
+
+When a goal is a plan, the plugin shows how much of it is done. It reads progress from three
+places, in this order:
+
+1. **The host's todo list.** An agent using OpenCode's plan tool calls `todowrite`; the plugin
+   reads the latest list from the session. `completed` counts as done, `cancelled` is dropped
+   from the plan, and `in_progress` is not done.
+2. **A checklist in the agent's latest reply.** If the agent keeps a markdown plan instead of
+   calling `todowrite`, the last assistant message is read for `- [ ]` / `- [x]` items.
+   Fenced code is ignored, so an example checklist in a code block is not counted.
+3. **A checklist in the goal text.** A goal written with checkboxes starts with that plan.
+
+The result is a ratio like `37/245 (15%)`. It appears in all four placements — the panel, the
+footer, the composer, and the sidebar — and in `/goal status`. The panel adds a filled bar, and
+the subgoal list is shown item by item; the compact placements use the short form.
+
+While the goal is active the TUI refreshes the plan from the session every few seconds, so the
+ratio moves during a turn rather than only when it settles.
+
+Cancelled items are left out of the total because they are no longer work. A plan with no
+items shows no progress rather than `0/0`.
+
+Subgoals are the other progress source. When a goal has subgoals, the panel shows both the
+subgoal ratio (`2/5 (40%)`) and the plan ratio, and the compact placements show both when
+they fit.
+
 ## Writing a goal in a fresh session
 
 Installing the plugin puts the tools on the turn, not the contract. Two things cover that:
@@ -434,9 +511,9 @@ judge leaves it out, the round says so (`No summary from the judge. 3 tool calls
 and does not invent one. The newest 40 rounds are kept, and the number dropped is shown.
 
 - **Side panel.** Sections with dividers: status, goal, this round (turn bar and a live
-  `running for` timer), last round (what it achieved and how long it took), proof, warnings, and
-  the judge's reason. The body is a scroll area, so a long goal no longer runs off the bottom.
-  `all rounds ▸` opens the rounds window.
+  `running for` timer), plan progress and subgoals, last round (what it achieved and how long
+  it took), proof, warnings, and the judge's reason. The body is a scroll area, so a long goal
+  no longer runs off the bottom. `all rounds ▸` opens the rounds window.
 - **`/goal rounds`.** A large window with one collapsible section per round, newest first. Click a
   header to open it, or use `[expand all]` and `[collapse all]`. With no TUI it prints a text report.
 - **`/goal help`.** The same scrolling, sectioned window. Scroll with the mouse wheel and close
@@ -446,11 +523,11 @@ and does not invent one. The newest 40 rounds are kept, and the number dropped i
   and the notes stay at the bottom. `[type…]` uses the host prompt.
 
 What is and is not verified: the round bookkeeping, the formatting, the help sections, the settings
-controls (what a click sends), and the presence matching are unit-tested. The window layout, the
-scrollbars, and click handling use the host's `scrollbox` and `dialog.show` and have only been
-type-checked, not looked at in a terminal. A plugin dialog receives no plugin key bindings in this
-host, so the controls are mouse driven. Typing a custom value uses the host prompt, which does
-take keys.
+controls (what a click sends), the presence matching, subgoal parsing and met tracking, and plan
+progress extraction are unit-tested. The window layout, the scrollbars, and click handling use
+the host's `scrollbox` and `dialog.show` and have only been type-checked, not looked at in a
+terminal. A plugin dialog receives no plugin key bindings in this host, so the controls are
+mouse driven. Typing a custom value uses the host prompt, which does take keys.
 
 If `/goal help` or `/goal settings` ever lands in the transcript as a prompt, the server logged
 `[goal] no TUI is present for <directory>` with the directories it did see, in `opencode.log`.
@@ -489,7 +566,7 @@ The point of this plugin is that it terminates. Six conditions, checked in order
 
 | # | Condition | Kind |
 | --- | --- | --- |
-| 1 | Judge returns `done` — the reply carries concrete evidence, or the digest plus a `verify-cmd` that just passed | model |
+| 1 | Judge returns `done` — the reply carries concrete evidence, or the digest plus a `verify-cmd` that just passed, and every subgoal is met | model |
 | 2 | Judge returns `blocked` — impossible, out of scope, needs credentials or hardware you do not have | model |
 | 3 | **Stall** — `stallLimit` consecutive turns ran no tools at all, so nothing changed however confident the prose | deterministic |
 | 4 | **Repetition** — the agent produced the same reply twice running | deterministic |
@@ -548,6 +625,9 @@ quiet, because a heuristic that pauses a loop on a guess is worse than one that 
 - **Your agent model must actually use tools.** If the session model narrates intentions
   without calling tools, the stall guard fires after two turns. That is the guard working, but
   it means the goal will not get done.
+- **Progress needs a plan the plugin can see.** It reads the host's `todowrite` list, a
+  checklist in the agent's latest reply, or checkboxes in the goal. A plan kept only in a file
+  is not read.
 - **Status messages cost a model call.** A synthetic session message is a real prompt in
   OpenCode, so this plugin does not emit one per iteration — loop progress is shown in the
   continuation prompt (`↻ [continuing toward your standing goal — turn 3/20]`) and a message is
@@ -562,9 +642,9 @@ quiet, because a heuristic that pauses a loop on a guess is worse than one that 
 The design follows the **Ralph loop**: keep a goal alive across turns and do not stop until it
 is achieved. That idea comes from the `/goal` command in
 [Codex CLI](https://github.com/openai/codex) by Eric Traut, and a very similar feature ships in
-[Hermes](https://github.com/) as `/goal`, whose command surface, completion-contract framing and
-judge verdicts this plugin deliberately mirrors. This is an independent implementation against
-OpenCode's V2 plugin API; no code was copied from either project.
+[Hermes](https://github.com/) as `/goal`, whose command surface, completion-contract framing,
+`/subgoal` criteria, and judge verdicts this plugin deliberately mirrors. This is an independent
+implementation against OpenCode's V2 plugin API; no code was copied from either project.
 
 ## Layout
 
@@ -578,7 +658,10 @@ OpenCode's V2 plugin API; no code was copied from either project.
 | `src/budget.ts` | server | Turn budget: parsing, the exhaustion gate, formatting. |
 | `src/display.ts` | TUI | Which placements are shown, `/goal display` argument parsing. |
 | `src/settings.ts` | server | The other three settings, override resolution, `/goal settings`. |
-| `test/*.test.ts` | — | Checks for the three pure modules. |
+| `src/subgoals.ts` | shared | `/subgoal` parsing, the met list, the done/continue rule, prompt blocks. |
+| `src/progress.ts` | shared | Plan progress from `todowrite`, reply checklists and goal checklists. |
+| `src/verdict.ts` | server | The judge's JSON, including the optional `met` list. |
+| `test/*.test.ts` | — | Checks for the pure modules. |
 
 `index.ts` and `tui.ts` have to stay at the root: OpenCode discovers a plugin by looking for
 those two names in the plugin directory, and ignores a `src/` layout for discovery. They are
@@ -605,16 +688,19 @@ The suite runs on Node's built-in test runner, so there is no test dependency to
 specifiers for OpenCode's own loader. Where a module is imported by both, the import is
 `import type`, which is erased and so has no runtime cost.
 
-Current state: 140 checks over three modules, at 100% line, branch and function coverage.
+Current state: 337 checks over the pure modules.
 
 | Module | What it covers |
 | --- | --- |
 | `budget.ts` | Turn-budget parsing, the exhaustion gate, formatting, the `maxTurns` option |
 | `display.ts` | Which placements are shown, `/goal display` argument parsing |
 | `settings.ts` | The other three settings, override resolution, the `/goal settings` summary |
+| `subgoals.ts` | `/subgoal` parsing, met tracking, the done/continue rule, prompt blocks |
+| `progress.ts` | `todowrite` and checklist progress, formatting, the bar |
+| `verdict.ts` | The judge's JSON, including the `met` list |
 
 `index.ts` and `tui.tsx` are not unit tested: they are mostly wiring, and the parts that
-historically broke were extracted into the three pure modules precisely so they could be.
+historically broke were extracted into the pure modules precisely so they could be.
 `npm run check` typechecks both.
 
 Bumping support for a new OpenCode release means bumping `@opencode/plugin` and re-running the

@@ -84,6 +84,8 @@ export function renderVerifyBlock(first: Verdict, results: readonly CommandResul
 /**
  * Run the commands only after a first-pass `done`, then judge again with the output
  * attached. The second pass may demote `done`. It must not promote a `continue`.
+ * The second pass's `met` list, when it gives one, is carried through so subgoal
+ * progress reflects the verdict that actually stands.
  */
 export async function confirmDone(options: {
   first: { verdict: Verdict; reason: string }
@@ -92,8 +94,8 @@ export async function confirmDone(options: {
   judgeAgain: (input: {
     first: Verdict
     results: CommandResult[]
-  }) => Promise<{ verdict: Verdict; reason: string }>
-}): Promise<{ verdict: Verdict; reason: string; results: CommandResult[]; ran: boolean }> {
+  }) => Promise<{ verdict: Verdict; reason: string; met?: number[] }>
+}): Promise<{ verdict: Verdict; reason: string; results: CommandResult[]; ran: boolean; met?: number[] }> {
   if (options.first.verdict !== "done" || options.commands.length === 0) {
     return { verdict: options.first.verdict, reason: options.first.reason, results: [], ran: false }
   }
@@ -104,7 +106,19 @@ export async function confirmDone(options: {
   }
   const second = await options.judgeAgain({ first: "done", results })
   if (second.verdict === "done") {
-    return { verdict: "done", reason: second.reason, results, ran: true }
+    return {
+      verdict: "done",
+      reason: second.reason,
+      results,
+      ran: true,
+      ...(second.met ? { met: second.met } : {}),
+    }
   }
-  return { verdict: second.verdict, reason: second.reason, results, ran: true }
+  return {
+    verdict: second.verdict,
+    reason: second.reason,
+    results,
+    ran: true,
+    ...(second.met ? { met: second.met } : {}),
+  }
 }

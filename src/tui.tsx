@@ -1,10 +1,12 @@
 import { Plugin } from "@opencode/plugin/tui"
-import { createEffect, createSignal, onCleanup, Show } from "solid-js"
+import { createEffect, createSignal, For, onCleanup, Show } from "solid-js"
 import { Goal, HELP_SECTIONS, type GoalView } from "./rpc.js"
 import { formatDuration, glyph, sectionsFromText, totalMs } from "./rounds.js"
 import { Divider, Heading, outcomeColour, RoundsView, SectionedView, SettingsView } from "./windows.js"
 import type { SettingControl, SettingsForm } from "./settings.js"
 import { formatTurns } from "./budget.js"
+import { formatProgress, progressBar } from "./progress.js"
+import { subgoalProgress } from "./subgoals.js"
 import { listen } from "./listen.js"
 import {
   applyAll,
@@ -353,12 +355,22 @@ export default Plugin.define({
           : status === "blocked"
             ? palette.error
             : palette.warning
+      /** Subgoal progress is the criteria count; plan progress is the agent's checklist. */
+      const progress = (current: GoalView) => {
+        const subgoals = subgoalProgress(current.subgoals)
+        const plan = current.progress ?? undefined
+        if (subgoals && plan) return `subgoals ${formatProgress(subgoals)} · plan ${formatProgress(plan)}`
+        if (subgoals) return `subgoals ${formatProgress(subgoals)}`
+        if (plan) return formatProgress(plan)
+        return ""
+      }
       return (
         <Show when={view()}>
           {(current) => (
             <text fg={colour(current().status)}>
               ● goal {word(current().status)}
               {current().status === "active" ? ` · turn ${formatTurns(current().turns, current().maxTurns)}` : ""}
+              {progress(current()) ? ` · ${progress(current())}` : ""}
             </text>
           )}
         </Show>
@@ -457,6 +469,10 @@ export default Plugin.define({
       const last = () => rounds()[rounds().length - 1]
       const started = () => props.view.turnStartedAt ?? 0
       const active = () => props.view.status === "active"
+      const subgoals = () => props.view.subgoals ?? []
+      const subgoalPlan = () => subgoalProgress(props.view.subgoals)
+      const plan = () => props.view.progress ?? undefined
+      const progressWidth = () => Math.max(8, Math.min(28, (props.width ?? 44) - 16))
 
       return (
         <scrollbox maxHeight={Math.max(6, context.renderer.terminalHeight - 8)}>
@@ -497,6 +513,35 @@ export default Plugin.define({
               </Show>
               <Show when={unlimited()}>
                 <text fg={palette.warning}>no turn limit — the judge and guards are the only stops</text>
+              </Show>
+            </Show>
+            <Show when={subgoalPlan() || plan()}>
+              <Divider palette={palette} width={width()} />
+              <Heading palette={palette} text="progress" />
+              <Show when={subgoalPlan()}>
+                {(current) => (
+                  <>
+                    <text fg={palette.base}>subgoals {formatProgress(current())}</text>
+                    <text fg={palette.muted}>{progressBar(current(), progressWidth())}</text>
+                    <For each={subgoals()}>
+                      {(subgoal, index) => (
+                        <text fg={subgoal.met ? palette.success : palette.muted}>
+                          {index() + 1}. [{subgoal.met ? "x" : " "}] {subgoal.text}
+                        </text>
+                      )}
+                    </For>
+                  </>
+                )}
+              </Show>
+              <Show when={plan()}>
+                {(current) => (
+                  <>
+                    <text fg={palette.base}>
+                      {current().source === "plan" ? "plan" : "checklist"} {formatProgress(current())}
+                    </text>
+                    <text fg={palette.muted}>{progressBar(current(), progressWidth())}</text>
+                  </>
+                )}
               </Show>
             </Show>
             <Show when={last()}>

@@ -211,7 +211,7 @@ describe("help", () => {
   })
 
   test("names the subcommands this plugin answers, including the new ones", () => {
-    for (const word of ["/goal rounds", "/goal status", "/goal settings", "verify-cmd", "/draft-goal"]) {
+    for (const word of ["/goal rounds", "/goal status", "/goal settings", "verify-cmd", "/draft-goal", "/subgoal"]) {
       assert.ok(HELP_TEXT.includes(word), `help does not mention ${word}`)
     }
   })

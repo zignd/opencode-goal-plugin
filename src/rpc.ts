@@ -15,8 +15,15 @@ import { Rpc } from "@opencode/plugin/rpc"
  */
 
 import type { Round } from "./rounds.js"
+import type { Progress } from "./progress.js"
 
 export type GoalStatus = "active" | "paused" | "done" | "blocked"
+
+/** One additional criterion the user added mid-goal. */
+export type SubgoalView = {
+  text: string
+  met: boolean
+}
 
 /**
  * The command reference, defined here because this is the only module both
@@ -48,7 +55,32 @@ export type GoalView = {
   /** Settled turns, newest last. Optional for the same reason. */
   rounds?: Round[]
   roundsDropped?: number
+  /** The plan's checklist progress, or null when the goal has no plan. Optional: added after v1. */
+  progress?: Progress | null
+  /** Criteria the user added mid-goal. Optional: added after v1. */
+  subgoals?: SubgoalView[]
 }
+
+const progressSchema = {
+  type: "object",
+  properties: {
+    done: { type: "number" },
+    total: { type: "number" },
+    source: { type: "string", enum: ["plan", "checklist", "subgoals"] },
+  },
+  required: ["done", "total", "source"],
+  additionalProperties: false,
+} as const
+
+const subgoalSchema = {
+  type: "object",
+  properties: {
+    text: { type: "string" },
+    met: { type: "boolean" },
+  },
+  required: ["text", "met"],
+  additionalProperties: false,
+} as const
 
 const state = {
   type: "object",
@@ -66,6 +98,8 @@ const state = {
     updatedAt: { type: "number" },
     turnStartedAt: { type: "number" },
     roundsDropped: { type: "number" },
+    progress: { anyOf: [progressSchema, { type: "null" }] },
+    subgoals: { type: "array", items: subgoalSchema },
     rounds: {
       type: "array",
       items: {
